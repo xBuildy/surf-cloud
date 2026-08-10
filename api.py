@@ -309,31 +309,49 @@ async def resize_display(body: dict):
     env = {**os.environ, "DISPLAY": ":99"}
 
     try:
-        # 1) Add the target resolution as a RANDR mode, then switch the output to it.
-        #    xrandr --fb alone can't shrink below the current CRTC size, so we must
-        #    add a mode and switch the output to it for the framebuffer to actually resize.
-        mode_name = f"{width}x{height}_60"
-        # Add the mode (ignore error if it already exists)
-        subprocess.run(
-            ["xrandr", "--newmode", mode_name, "30.00"],
+        mode_name = f"{width}x{height}_60.00"
+
+        # 1) Generate a proper modeline via cvt (xrandr --newmode needs full timing params,
+        #    not just a pixel clock — cvt computes hsync/vsync/totals automatically).
+        cvt_result = subprocess.run(
+            ["cvt", str(width), str(height), "60"],
             capture_output=True, timeout=5, text=True, env=env
         )
-        # Find the output name (Xvfb usually reports "screen" or "default")
-        query = subprocess.run(
-            ["xrandr", "-q"],
-            capture_output=True, timeout=5, text=True, env=env
-        )
+        modeline_params = []
+        for line in cvt_result.stdout.split("\n"):
+            if line.strip().startswith("Modeline"):
+                # Example: Modeline "1080x1920_60.00"  244.00  1080 1152 1272 1464  1920 1923 1933 1988 -hsync +vsync
+                parts = line.strip().split()
+                mode_name = parts[1].strip('"')
+                modeline_params = parts[2:]
+                break
+        log["steps"].append({"cmd": "cvt", "modeline_params": modeline_params, "mode_name": mode_name})
+
+        if modeline_params:
+            # 2) Register the mode (ignore error if it already exists from a prior call)
+            r_new = subprocess.run(
+                ["xrandr", "--newmode", mode_name] + modeline_params,
+                capture_output=True, timeout=5, text=True, env=env
+            )
+            log["steps"].append({"cmd": "xrandr --newmode", "returncode": r_new.returncode, "stderr": r_new.stderr.strip()[:200]})
+
+        # 3) Find the connected output name (Xvfb reports something like "screen" or "SCREEN-1")
+        query = subprocess.run(["xrandr", "-q"], capture_output=True, timeout=5, text=True, env=env)
         output_name = "screen"
         for line in query.stdout.split("\n"):
-            if " connected" in line and not "disconnected" in line:
+            if " connected" in line and "disconnected" not in line:
                 output_name = line.split()[0]
                 break
-        # Add mode to the output (ignore error if already added)
-        subprocess.run(
+        log["steps"].append({"cmd": "xrandr -q", "output_name": output_name, "raw_head": query.stdout[:150]})
+
+        # 4) Add mode to the output (ignore error if already added)
+        r_add = subprocess.run(
             ["xrandr", "--addmode", output_name, mode_name],
             capture_output=True, timeout=5, text=True, env=env
         )
-        # Switch the output to the new mode — this resizes the actual framebuffer
+        log["steps"].append({"cmd": "xrandr --addmode", "returncode": r_add.returncode, "stderr": r_add.stderr.strip()[:200]})
+
+        # 5) Switch the output to the new mode — this actually resizes the framebuffer
         r1 = subprocess.run(
             ["xrandr", "--output", output_name, "--mode", mode_name],
             capture_output=True, timeout=5, text=True, env=env
