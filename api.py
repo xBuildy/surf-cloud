@@ -311,21 +311,23 @@ async def resize_display(body: dict):
     try:
         mode_name = f"{width}x{height}_60.00"
 
-        # 1) Generate a proper modeline via cvt (xrandr --newmode needs full timing params,
-        #    not just a pixel clock — cvt computes hsync/vsync/totals automatically).
-        cvt_result = subprocess.run(
-            ["cvt", str(width), str(height), "60"],
-            capture_output=True, timeout=5, text=True, env=env
-        )
-        modeline_params = []
-        for line in cvt_result.stdout.split("\n"):
-            if line.strip().startswith("Modeline"):
-                # Example: Modeline "1080x1920_60.00"  244.00  1080 1152 1272 1464  1920 1923 1933 1988 -hsync +vsync
-                parts = line.strip().split()
-                mode_name = parts[1].strip('"')
-                modeline_params = parts[2:]
-                break
-        log["steps"].append({"cmd": "cvt", "modeline_params": modeline_params, "mode_name": mode_name})
+        # 1) Build a modeline ourselves. This is a headless virtual display (Xvfb) with no
+        #    real monitor to sync, so we don't need VESA/CVT-precise timings — just
+        #    internally-consistent numbers (htotal > hsyncend > hsyncstart > hdisp, etc.)
+        #    that xrandr will accept. Avoids depending on the external cvt/gtf binaries,
+        #    which aren't reliably present across base images.
+        h_front, h_sync, h_back = 8, 32, 40
+        v_front, v_sync, v_back = 3, 5, 13
+        htotal = width + h_front + h_sync + h_back
+        vtotal = height + v_front + v_sync + v_back
+        hsyncstart, hsyncend = width + h_front, width + h_front + h_sync
+        vsyncstart, vsyncend = height + v_front, height + v_front + v_sync
+        pixel_clock_mhz = (htotal * vtotal * 60) / 1_000_000.0
+        modeline_params = [
+            f"{pixel_clock_mhz:.2f}", str(width), str(hsyncstart), str(hsyncend), str(htotal),
+            str(height), str(vsyncstart), str(vsyncend), str(vtotal), "-hsync", "+vsync"
+        ]
+        log["steps"].append({"cmd": "generated modeline", "modeline_params": modeline_params, "mode_name": mode_name})
 
         if modeline_params:
             # 2) Register the mode (ignore error if it already exists from a prior call)
