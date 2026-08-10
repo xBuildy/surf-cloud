@@ -297,6 +297,82 @@ async def new_tab(body: dict):
 
 
 
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+)
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+@app.post("/api/set-device-mode")
+async def set_device_mode(body: dict):
+    """
+    Switch the browser between real mobile and desktop rendering via CDP —
+    not just a resized window. This makes sites actually serve/render their
+    mobile layout (responsive breakpoints, mobile UA sniffing, touch-only UI),
+    the same way real Chrome DevTools device emulation works.
+    """
+    check_api_key(body.get("api_key", ""))
+    mode = body.get("mode", "desktop")  # "mobile" | "desktop"
+    width = body.get("width", 1080 if mode == "mobile" else 1920)
+    height = body.get("height", 1920 if mode == "mobile" else 1080)
+    is_mobile = mode == "mobile"
+
+    log = {"steps": []}
+    try:
+        if is_mobile:
+            cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": 3,
+                "mobile": True,
+                "screenWidth": width,
+                "screenHeight": height,
+            })
+            cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5})
+            cdp.send("Emulation.setEmitTouchEventsForMouse", {"enabled": True, "configuration": "mobile"})
+            cdp.send("Network.setUserAgentOverride", {
+                "userAgent": MOBILE_USER_AGENT,
+                "platform": "Android",
+                "userAgentMetadata": {
+                    "platform": "Android",
+                    "mobile": True,
+                    "brands": [{"brand": "Chromium", "version": "126"}, {"brand": "Google Chrome", "version": "126"}]
+                }
+            })
+            log["steps"].append({"cmd": "mobile emulation applied", "width": width, "height": height})
+        else:
+            cdp.send("Emulation.clearDeviceMetricsOverride")
+            cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+            cdp.send("Network.setUserAgentOverride", {
+                "userAgent": DESKTOP_USER_AGENT,
+                "platform": "Win32",
+                "userAgentMetadata": {
+                    "platform": "Windows",
+                    "mobile": False,
+                    "brands": [{"brand": "Chromium", "version": "126"}, {"brand": "Google Chrome", "version": "126"}]
+                }
+            })
+            log["steps"].append({"cmd": "desktop emulation applied", "width": width, "height": height})
+
+        # Reload so the site re-fetches with the new User-Agent header and
+        # re-evaluates responsive breakpoints — many sites decide mobile vs
+        # desktop layout server-side on the initial request, not just via CSS.
+        if body.get("reload", True):
+            try:
+                cdp.send("Page.reload", {"ignoreCache": True})
+                log["steps"].append({"cmd": "Page.reload", "ok": True})
+            except Exception as e:
+                log["steps"].append({"cmd": "Page.reload", "error": str(e)})
+
+        return {"status": "ok", "mode": mode, "width": width, "height": height, "debug": log}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/resize")
 async def resize_display(body: dict):
     check_api_key(body.get("api_key", ""))
