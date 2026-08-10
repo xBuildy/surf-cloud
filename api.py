@@ -5,6 +5,7 @@ Used by Wave OS Surf app's "Ask AI" panel via the Wave Assistant.
 """
 
 import os
+import subprocess
 import json
 import time
 import threading
@@ -291,6 +292,39 @@ async def new_tab(body: dict):
     try:
         result = cdp.new_tab(url)
         return {"status": "ok", "tab": {"id": result.get("id", ""), "url": result.get("url", "")}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.post("/api/resize")
+async def resize_display(body: dict):
+    check_api_key(body.get("api_key", ""))
+    width = body.get("width")
+    height = body.get("height")
+    if not width or not height:
+        raise HTTPException(status_code=400, detail="Missing 'width' or 'height'")
+    try:
+        # Resize the Xvfb virtual display via xrandr
+        subprocess.run(
+            ["xrandr", "--output", "default", "--mode", f"{width}x{height}"],
+            capture_output=True, timeout=5
+        )
+        time.sleep(0.5)
+
+        # Also resize the Chromium window to fill the new display
+        try:
+            window_info = cdp.send("Browser.getWindowForTarget")
+            window_id = window_info.get("windowId")
+            if window_id:
+                cdp.send("Browser.setWindowBounds", {
+                    "windowId": window_id,
+                    "bounds": {"width": width, "height": height, "windowState": "normal"}
+                })
+        except Exception:
+            pass  # Window resize is best-effort
+
+        return {"status": "ok", "width": width, "height": height}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

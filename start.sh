@@ -9,7 +9,7 @@ sleep 2
 echo "[Surf Cloud] Xvfb started on :99"
 
 # Start x11vnc (VNC server)
-x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -quiet &
+x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -quiet -xrandr &
 sleep 2
 echo "[Surf Cloud] x11vnc started on port 5900"
 
