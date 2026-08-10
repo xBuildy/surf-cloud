@@ -27,7 +27,7 @@ else
 fi
 
 # Start Chromium with CDP enabled
-chromium     --no-sandbox     --disable-gpu     --disable-dev-shm-usage     --remote-debugging-port=9222     --remote-debugging-address=127.0.0.1     --window-size=1280,800     --window-position=0,0     --start-maximized     "https://www.google.com" &
+chromium --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --remote-allow-origins=* --window-size=1280,800 --window-position=0,0 --start-maximized "https://www.google.com" &
 sleep 3
 echo "[Surf Cloud] Chromium started with CDP on port 9222"
 
