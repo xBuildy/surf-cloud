@@ -304,27 +304,55 @@ async def resize_display(body: dict):
     height = body.get("height")
     if not width or not height:
         raise HTTPException(status_code=400, detail="Missing 'width' or 'height'")
+
+    log = {"steps": []}
+    env = {**os.environ, "DISPLAY": ":99"}
+
     try:
-        # Resize the Xvfb virtual display via xrandr
-        subprocess.run(
-            ["xrandr", "--output", "default", "--mode", f"{width}x{height}"],
-            capture_output=True, timeout=5
+        # 1) Resize the actual Xvfb root framebuffer (not just a mode — the real screen size)
+        r1 = subprocess.run(
+            ["xrandr", "--fb", f"{width}x{height}"],
+            capture_output=True, timeout=5, text=True, env=env
         )
+        log["steps"].append({
+            "cmd": "xrandr --fb", "returncode": r1.returncode,
+            "stderr": r1.stderr.strip()[:300]
+        })
         time.sleep(0.5)
 
-        # Also resize the Chromium window to fill the new display
+        # 2) Find the Chromium window via xdotool and force it to match the new size exactly
+        try:
+            search = subprocess.run(
+                ["xdotool", "search", "--class", "chromium"],
+                capture_output=True, timeout=5, text=True, env=env
+            )
+            window_ids = [w for w in search.stdout.strip().split("\n") if w]
+            log["steps"].append({"cmd": "xdotool search", "window_ids": window_ids})
+
+            for wid in window_ids:
+                subprocess.run(["xdotool", "windowmove", wid, "0", "0"], capture_output=True, timeout=5, env=env)
+                r2 = subprocess.run(
+                    ["xdotool", "windowsize", wid, str(width), str(height)],
+                    capture_output=True, timeout=5, text=True, env=env
+                )
+                log["steps"].append({"cmd": f"xdotool windowsize {wid}", "returncode": r2.returncode, "stderr": r2.stderr.strip()[:200]})
+        except Exception as e:
+            log["steps"].append({"cmd": "xdotool", "error": str(e)})
+
+        # 3) CDP resize as a second guarantee (works even if xdotool window match failed)
         try:
             window_info = cdp.send("Browser.getWindowForTarget")
             window_id = window_info.get("windowId")
             if window_id:
                 cdp.send("Browser.setWindowBounds", {
                     "windowId": window_id,
-                    "bounds": {"width": width, "height": height, "windowState": "normal"}
+                    "bounds": {"left": 0, "top": 0, "width": width, "height": height, "windowState": "normal"}
                 })
-        except Exception:
-            pass  # Window resize is best-effort
+                log["steps"].append({"cmd": "CDP setWindowBounds", "window_id": window_id, "ok": True})
+        except Exception as e:
+            log["steps"].append({"cmd": "CDP setWindowBounds", "error": str(e)})
 
-        return {"status": "ok", "width": width, "height": height}
+        return {"status": "ok", "width": width, "height": height, "debug": log}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

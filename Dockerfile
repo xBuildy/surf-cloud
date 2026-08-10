@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 
-RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         chromium         xvfb         x11vnc         novnc         websockify         python3         python3-pip         python3-venv         nginx         supervisor         fonts-liberation         fonts-noto-cjk         dbus x11-xserver-utils
+RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         chromium         xvfb         x11vnc         novnc         websockify         python3         python3-pip         python3-venv         nginx         supervisor         fonts-liberation         fonts-noto-cjk         dbus x11-xserver-utils xdotool wmctrl
 
 RUN pip3 install --no-cache-dir --break-system-packages         fastapi uvicorn[standard] websocket-client httpx
 
