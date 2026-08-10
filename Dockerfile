@@ -5,6 +5,7 @@ RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no
 RUN pip3 install --no-cache-dir --break-system-packages         fastapi uvicorn[standard] websocket-client httpx
 
 COPY nginx.conf /etc/nginx/sites-available/surf
+COPY vnc.html /usr/share/novnc/vnc.html
 RUN ln -sf /etc/nginx/sites-available/surf /etc/nginx/sites-enabled/surf
 
 COPY api.py /app/api.py

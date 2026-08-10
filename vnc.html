@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Surf Cloud</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            width: 100%; height: 100%; overflow: hidden;
+            background-color: #000;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            touch-action: none;
+        }
+        #screen {
+            width: 100%; height: 100%;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            display: flex; align-items: center; justify-content: center;
+        }
+        #screen canvas {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: fill !important;
+            display: block;
+            touch-action: none;
+        }
+        #noVNC_keyboardinput {
+            position: absolute;
+            top: -100px; left: -100px;
+            width: 1px; height: 1px;
+            opacity: 0; border: none; outline: none;
+            padding: 0; margin: 0; z-index: -1;
+            ime-mode: disabled;
+        }
+        #keyboard_toggle_btn {
+            position: fixed; bottom: 16px; right: 16px;
+            z-index: 9999; width: 44px; height: 44px;
+            border-radius: 50%;
+            background-color: rgba(0,0,0,0.65); color: #fff;
+            border: 1px solid rgba(255,255,255,0.25);
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; user-select: none; -webkit-user-select: none;
+            backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            transition: transform 0.1s ease, background-color 0.2s ease;
+        }
+        #keyboard_toggle_btn:active {
+            transform: scale(0.92);
+            background-color: rgba(0,0,0,0.85);
+        }
+        #keyboard_toggle_btn svg { width: 22px; height: 22px; fill: currentColor; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="screen"></div>
+    <textarea id="noVNC_keyboardinput" autocapitalize="off" autocomplete="off" spellcheck="false" tabindex="-1"></textarea>
+    <div id="keyboard_toggle_btn" title="Toggle Keyboard" aria-label="Toggle Keyboard">
+        <svg viewBox="0 0 24 24"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-3-3h2v2H5V8zm0 3h2v2H5v-2zm8 5H8v-2h6v2zm3-2h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg>
+    </div>
+
+    <script type="module">
+        import RFB from './core/rfb.js';
+        import Keyboard from './core/input/keyboard.js';
+        import KeyTable from './core/input/keysym.js';
+        import keysyms from './core/input/keysymdef.js';
+
+        let rfb = null;
+        let touchKeyboard = null;
+        let lastKeyboardInput = '';
+        const DEFAULT_BUF_LEN = 100;
+
+        const screenElem = document.getElementById('screen');
+        const keyboardInput = document.getElementById('noVNC_keyboardinput');
+        const toggleBtn = document.getElementById('keyboard_toggle_btn');
+
+        function getQueryParam(name, defaultValue) {
+            const re = new RegExp('.*[?&]' + name + '=([^&#]*)');
+            const match = ''.concat(window.location.href, window.location.hash).match(re);
+            return match ? decodeURIComponent(match[1]) : defaultValue;
+        }
+
+        const host = getQueryParam('host', window.location.hostname);
+        const port = getQueryParam('port', window.location.port);
+        const password = getQueryParam('password', '');
+        const path = getQueryParam('path', 'websockify');
+        const hideKbdBtn = getQueryParam('hide_kbd_btn', '0') === '1';
+
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        let wsUrl = `${wsProtocol}://${host}`;
+        if (port) wsUrl += `:${port}`;
+        wsUrl += `/${path}`;
+
+        function initRFB() {
+            rfb = new RFB(screenElem, wsUrl, {
+                credentials: { password: password }
+            });
+            rfb.scaleViewport = true;
+            rfb.resizeSession = false;
+            rfb.focusOnClick = true;
+            rfb.addEventListener('connect', () => console.log('[noVNC] Connected'));
+            rfb.addEventListener('disconnect', (e) => console.log('[noVNC] Disconnected:', e.detail));
+        }
+
+        function resetInputBuffer() {
+            keyboardInput.value = new Array(DEFAULT_BUF_LEN).join('_');
+            lastKeyboardInput = keyboardInput.value;
+        }
+
+        function focusVirtualKeyboard() {
+            if (document.activeElement !== keyboardInput) {
+                if (rfb) rfb.focusOnClick = false;
+                keyboardInput.focus();
+                try {
+                    const len = keyboardInput.value.length;
+                    keyboardInput.setSelectionRange(len, len);
+                } catch (e) {}
+            }
+        }
+
+        function blurVirtualKeyboard() {
+            if (document.activeElement === keyboardInput) {
+                keyboardInput.blur();
+                if (rfb) rfb.focusOnClick = true;
+            }
+        }
+
+        function toggleVirtualKeyboard() {
+            if (document.activeElement === keyboardInput) blurVirtualKeyboard();
+            else focusVirtualKeyboard();
+        }
+
+        function initVirtualKeyboard() {
+            resetInputBuffer();
+            touchKeyboard = new Keyboard(keyboardInput);
+            touchKeyboard.onkeyevent = (keysym, code, down) => {
+                if (rfb) rfb.sendKey(keysym, code, down);
+            };
+            touchKeyboard.grab();
+
+            keyboardInput.addEventListener('input', (event) => {
+                if (!rfb) return;
+                const newValue = event.target.value;
+                if (!lastKeyboardInput) resetInputBuffer();
+                const oldValue = lastKeyboardInput;
+                let newLen;
+                try { newLen = Math.max(event.target.selectionStart, newValue.length); }
+                catch (e) { newLen = newValue.length; }
+                const oldLen = oldValue.length;
+                let inputs = newLen - oldLen;
+                let backspaces = inputs < 0 ? -inputs : 0;
+                for (let i = 0; i < Math.min(oldLen, newLen); i++) {
+                    if (newValue.charAt(i) !== oldValue.charAt(i)) {
+                        inputs = newLen - i;
+                        backspaces = oldLen - i;
+                        break;
+                    }
+                }
+                for (let i = 0; i < backspaces; i++) rfb.sendKey(KeyTable.XK_BackSpace, 'Backspace');
+                for (let i = newLen - inputs; i < newLen; i++) {
+                    const keysym = keysyms.lookup(newValue.charCodeAt(i));
+                    rfb.sendKey(keysym);
+                }
+                if (newLen > 2 * DEFAULT_BUF_LEN || newLen < 1) {
+                    resetInputBuffer();
+                    if (newLen < 1) { event.target.blur(); setTimeout(() => focusVirtualKeyboard(), 0); }
+                } else { lastKeyboardInput = newValue; }
+            });
+
+            const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+            if (isTouchDevice) {
+                screenElem.addEventListener('pointerup', () => { focusVirtualKeyboard(); }, { passive: true });
+            }
+            toggleBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleVirtualKeyboard(); });
+            if (hideKbdBtn) toggleBtn.classList.add('hidden');
+        }
+
+        window.addEventListener('DOMContentLoaded', () => { initRFB(); initVirtualKeyboard(); });
+    </script>
+</body>
+</html>
