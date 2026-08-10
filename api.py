@@ -309,13 +309,38 @@ async def resize_display(body: dict):
     env = {**os.environ, "DISPLAY": ":99"}
 
     try:
-        # 1) Resize the actual Xvfb root framebuffer (not just a mode — the real screen size)
+        # 1) Add the target resolution as a RANDR mode, then switch the output to it.
+        #    xrandr --fb alone can't shrink below the current CRTC size, so we must
+        #    add a mode and switch the output to it for the framebuffer to actually resize.
+        mode_name = f"{width}x{height}_60"
+        # Add the mode (ignore error if it already exists)
+        subprocess.run(
+            ["xrandr", "--newmode", mode_name, "30.00"],
+            capture_output=True, timeout=5, text=True, env=env
+        )
+        # Find the output name (Xvfb usually reports "screen" or "default")
+        query = subprocess.run(
+            ["xrandr", "-q"],
+            capture_output=True, timeout=5, text=True, env=env
+        )
+        output_name = "screen"
+        for line in query.stdout.split("\n"):
+            if " connected" in line and not "disconnected" in line:
+                output_name = line.split()[0]
+                break
+        # Add mode to the output (ignore error if already added)
+        subprocess.run(
+            ["xrandr", "--addmode", output_name, mode_name],
+            capture_output=True, timeout=5, text=True, env=env
+        )
+        # Switch the output to the new mode — this resizes the actual framebuffer
         r1 = subprocess.run(
-            ["xrandr", "--fb", f"{width}x{height}"],
+            ["xrandr", "--output", output_name, "--mode", mode_name],
             capture_output=True, timeout=5, text=True, env=env
         )
         log["steps"].append({
-            "cmd": "xrandr --fb", "returncode": r1.returncode,
+            "cmd": f"xrandr --output {output_name} --mode {mode_name}",
+            "returncode": r1.returncode,
             "stderr": r1.stderr.strip()[:300]
         })
         time.sleep(0.5)
