@@ -1,38 +1,21 @@
-FROM jlesage/chromium
+FROM debian:bookworm-slim
 
-# Install Python, nginx, and dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        nginx \
-        supervisor && \
-    pip3 install --no-cache-dir --break-system-packages \
-        fastapi \
-        uvicorn[standard] \
-        websocket-client \
-        httpx && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         chromium         xvfb         x11vnc         novnc         websockify         python3         python3-pip         python3-venv         nginx         supervisor         fonts-liberation         fonts-noto-cjk         dbus
 
-# Configure nginx as reverse proxy
+RUN pip3 install --no-cache-dir --break-system-packages         fastapi uvicorn[standard] websocket-client httpx
+
 COPY nginx.conf /etc/nginx/sites-available/surf
-RUN rm -f /etc/nginx/sites-enabled/default && \
-    ln -s /etc/nginx/sites-available/surf /etc/nginx/sites-enabled/surf
+RUN ln -sf /etc/nginx/sites-available/surf /etc/nginx/sites-enabled/surf
 
-# Copy the automation API
 COPY api.py /app/api.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
-# Add S6 services for nginx and the API
-RUN mkdir -p /etc/services.d/surf-nginx /etc/services.d/surf-api
-
-COPY services/surf-nginx/run /etc/services.d/surf-nginx/run
-COPY services/surf-api/run /etc/services.d/surf-api/run
-RUN chmod +x /etc/services.d/surf-nginx/run /etc/services.d/surf-api/run
-
-# Enable CDP in Chromium (localhost only — never expose publicly)
-ENV CHROME_CLI_ARGS="--remote-debugging-port=9222 --remote-debugging-address=127.0.0.1"
-
-# Railway uses PORT env var
+ENV DISPLAY=:99
 ENV PORT=8080
+ENV API_PORT=8000
+ENV SURF_API_KEY=surf-default-key
 
 EXPOSE 8080
+
+CMD ["/app/start.sh"]
