@@ -339,7 +339,11 @@ async def set_device_mode(body: dict):
                 "platform": "Android",
                 "userAgentMetadata": {
                     "platform": "Android",
+                    "platformVersion": "14.0.0",
+                    "architecture": "",
+                    "model": "Pixel 8",
                     "mobile": True,
+                    "bitness": "64",
                     "brands": [{"brand": "Chromium", "version": "126"}, {"brand": "Google Chrome", "version": "126"}]
                 }
             })
@@ -352,7 +356,11 @@ async def set_device_mode(body: dict):
                 "platform": "Win32",
                 "userAgentMetadata": {
                     "platform": "Windows",
+                    "platformVersion": "10.0.0",
+                    "architecture": "x86",
+                    "model": "",
                     "mobile": False,
+                    "bitness": "64",
                     "brands": [{"brand": "Chromium", "version": "126"}, {"brand": "Google Chrome", "version": "126"}]
                 }
             })
