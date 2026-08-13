@@ -1,0 +1,74 @@
+# Surf Cloud v2 — noVNC Customization
+# Custom branding for Wave OS dark theme
+
+# This file is injected into the noVNC viewer to customize its appearance.
+# The jlesage/chromium base image uses noVNC's web-based VNC client.
+
+## Custom CSS for noVNC viewer
+# Apply Wave OS dark theme to the noVNC interface
+
+novnc-custom-styles:
+  # Dark background matching Wave OS theme
+  body:
+    background: "#0a0a0c"
+    font-family: "'WixMadefor', sans-serif"
+
+  # Branding — replace noVNC logo with Surf Cloud branding
+  .noVNC_status:
+    background: "linear-gradient(135deg, #00d8c0 0%, #0d4a5c 100%)"
+    color: "#ffffff"
+    font-weight: "600"
+
+  # Auto-connect (hide the connect button, auto-connect on load)
+  .noVNC_connect_button:
+    display: "none"
+
+  # Clean toolbar — minimal controls
+  .noVNC_buttons:
+    background: "#111216"
+    border: "1px solid #1a1a20"
+
+  # Scaling mode — fit to window by default
+  .noVNC_canvas:
+    background: "#0a0a0c"
+
+## Custom loading screen
+# Shown while Chromium boots up
+loading_screen:
+  html: |
+    <div class="surf-loading">
+      <div class="surf-logo">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <path d="M4 24 Q12 12, 24 24 T44 24" stroke="#00d8c0" stroke-width="3" fill="none"/>
+          <path d="M4 30 Q12 18, 24 30 T44 30" stroke="#00d8c0" stroke-width="2" fill="none" opacity="0.6"/>
+          <path d="M4 18 Q12 6, 24 18 T44 18" stroke="#00d8c0" stroke-width="2" fill="none" opacity="0.4"/>
+        </svg>
+      </div>
+      <p>Surf Cloud</p>
+      <p class="surf-loading-text">Starting browser...</p>
+    </div>
+  css: |
+    .surf-loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: #00d8c0;
+      font-family: sans-serif;
+    }
+    .surf-loading p {
+      margin: 8px 0;
+      font-size: 18px;
+    }
+    .surf-loading .surf-loading-text {
+      font-size: 14px;
+      color: #666;
+    }
+    .surf-logo svg {
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }

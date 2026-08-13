@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# Ensure browser profile directory exists
+mkdir -p /config/browser-profiles
+
+# Install Playwright browsers on first run (idempotent)
+python3 -m playwright install chromium 2>/dev/null || true
+
+# Start the uvicorn server
+if [ -f /app/api_v2.py ]; then
+    exec python3 /app/api_v2.py
+elif [ -f /app/api.py ]; then
+    exec python3 /app/api.py
+else
+    exec uvicorn api:app --host 0.0.0.0 --port 8000
+fi
