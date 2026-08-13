@@ -22,6 +22,7 @@ import json
 import time
 import asyncio
 import base64
+import subprocess
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -199,6 +200,16 @@ class UserRecordRequest(BaseModel):
     api_key: str = ""
     user_id: str
     name: str = ""
+
+
+
+class ResizeRequest(BaseModel):
+    api_key: str = ""
+    user_id: str = ""
+    width: int = 1920
+    height: int = 1080
+    is_mobile: bool = False
+    device_pixel_ratio: float = 1.0
 
 class UserReplayRequest(BaseModel):
     api_key: str = ""
@@ -911,6 +922,229 @@ async def record_replay(body: UserReplayRequest):
         return {"status": "ok", "replay": result, "user_id": body.user_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# DYNAMIC RESIZE & MOBILE EMULATION
+# ════════════════════════════════════════════════════════════════════════════
+
+MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+def _run_xrandr(args: list) -> str:
+    """Run xrandr with DISPLAY=:99 and return stdout."""
+    env = os.environ.copy()
+    env["DISPLAY"] = ":99"
+    result = subprocess.run(["xrandr"] + args, capture_output=True, text=True, env=env, timeout=10)
+    if result.returncode != 0:
+        logger.warning(f"xrandr {' '.join(args)} failed: {result.stderr}")
+    return result.stdout
+
+def _get_xrandr_output_name() -> str:
+    """Detect the Xvfb RandR output name (usually 'default' or a screen name)."""
+    try:
+        env = os.environ.copy()
+        env["DISPLAY"] = ":99"
+        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, env=env, timeout=10)
+        for line in result.stdout.split("\n"):
+            # Look for connected output lines (not the screen line at the bottom)
+            if " connected" in line and "Screen" not in line:
+                parts = line.split()
+                if parts:
+                    return parts[0]
+        # Fallback: try 'default'
+        return "default"
+    except Exception as e:
+        logger.warning(f"Could not detect RandR output name: {e}")
+        return "default"
+
+def _resize_x11(width: int, height: int) -> bool:
+    """Resize Xvfb display via RandR. Returns True on success."""
+    try:
+        output_name = _get_xrandr_output_name()
+        # Try direct mode switch first
+        mode_str = f"{width}x{height}"
+        _run_xrandr(["--output", output_name, "-s", mode_str])
+        
+        # Verify it took effect
+        env = os.environ.copy()
+        env["DISPLAY"] = ":99"
+        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, env=env, timeout=10)
+        if f"{width}x{height}" in result.stdout and "*" in result.stdout:
+            logger.info(f"X11 resized to {width}x{height} via direct mode switch")
+            return True
+        
+        # If direct switch failed, try adding a new mode via cvt
+        logger.info("Direct mode switch failed, trying cvt modeline...")
+        cvt_result = subprocess.run(
+            ["cvt", str(width), str(height)],
+            capture_output=True, text=True, timeout=10
+        )
+        if cvt_result.returncode == 0:
+            # Parse modeline from cvt output
+            lines = cvt_result.stdout.strip().split("\n")
+            modeline_line = None
+            for line in lines:
+                if "Modeline" in line or '"' in line:
+                    modeline_line = line
+                    break
+            
+            if modeline_line:
+                # Extract the modeline values
+                parts = modeline_line.split()
+                # Format: "name" hdisp hsync hss hse vdisp vsync vss vse flags
+                mode_name = f"surf_{width}x{height}"
+                # Find the quoted name in cvt output, replace with our name
+                modeline_values = parts[2:]  # After "Modeline" and the name
+                modeline_str = " ".join(modeline_values)
+                
+                _run_xrandr(["--newmode", mode_name] + modeline_values)
+                _run_xrandr(["--addmode", output_name, mode_name])
+                _run_xrandr(["--output", output_name, "--mode", mode_name])
+                logger.info(f"X11 resized to {width}x{height} via new cvt mode")
+                return True
+        
+        logger.warning(f"Could not resize X11 to {width}x{height}")
+        return False
+    except Exception as e:
+        logger.error(f"X11 resize error: {e}")
+        return False
+
+def _resize_chromium_window(width: int, height: int) -> bool:
+    """Resize and reposition the Chromium window to fill the display."""
+    try:
+        env = os.environ.copy()
+        env["DISPLAY"] = ":99"
+        
+        # Try wmctrl first
+        result = subprocess.run(
+            ["wmctrl", "-r", ":ACTIVE:", "-e", f"0,0,0,{width},{height}"],
+            capture_output=True, text=True, env=env, timeout=10
+        )
+        if result.returncode == 0:
+            logger.info(f"Chromium window resized to {width}x{height} via wmctrl")
+            return True
+        
+        # Fallback to xdotool
+        result = subprocess.run(
+            ["xdotool", "search", "--class", "chromium", "windowsize", str(width), str(height)],
+            capture_output=True, text=True, env=env, timeout=10
+        )
+        if result.returncode == 0:
+            subprocess.run(
+                ["xdotool", "search", "--class", "chromium", "windowmove", "0", "0"],
+                capture_output=True, text=True, env=env, timeout=10
+            )
+            logger.info(f"Chromium window resized to {width}x{height} via xdotool")
+            return True
+        
+        logger.warning("Could not resize Chromium window")
+        return False
+    except Exception as e:
+        logger.error(f"Chromium window resize error: {e}")
+        return False
+
+async def _set_mobile_emulation(page, is_mobile: bool, width: int, height: int, dpr: float):
+    """Apply CDP mobile or desktop emulation to a Playwright page."""
+    client = await page.context.new_cdp_session(page)
+    
+    if is_mobile:
+        await client.send("Emulation.setDeviceMetricsOverride", {
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": dpr,
+            "mobile": True,
+        })
+        await client.send("Emulation.setUserAgentOverride", {
+            "userAgent": MOBILE_UA,
+        })
+    else:
+        await client.send("Emulation.setDeviceMetricsOverride", {
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": dpr,
+            "mobile": False,
+        })
+        await client.send("Emulation.setUserAgentOverride", {
+            "userAgent": DESKTOP_UA,
+        })
+
+@app.post("/api/resize")
+async def resize_session(body: ResizeRequest):
+    """Dynamically resize the browser viewport and optionally apply mobile emulation."""
+    check_api_key(body.api_key)
+    
+    # Clamp dimensions to reasonable bounds
+    width = max(320, min(3840, body.width))
+    height = max(400, min(2160, body.height))
+    is_mobile = body.is_mobile
+    dpr = max(0.5, min(3.0, body.device_pixel_ratio))
+    
+    errors = []
+    
+    # 1. Resize X11 display
+    x11_ok = _resize_x11(width, height)
+    if not x11_ok:
+        errors.append("X11 resize failed")
+    
+    # 2. Resize Chromium window
+    win_ok = _resize_chromium_window(width, height)
+    if not win_ok:
+        errors.append("Chromium window resize failed")
+    
+    # 3. Apply mobile/desktop emulation via CDP
+    mobile_ok = False
+    try:
+        if SESSION_MANAGER_AVAILABLE and session_manager:
+            page = await session_manager.get_page(body.user_id)
+            await _set_mobile_emulation(page, is_mobile, width, height, dpr)
+            mobile_ok = True
+        else:
+            # Fallback: use direct CDP websocket
+            import websockets
+            cdp_url = f"http://{CDP_HOST}:{CDP_PORT}/json"
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(cdp_url)
+                targets = resp.json()
+            
+            ws_url = None
+            for t in targets:
+                if t.get("type") == "page":
+                    ws_url = t.get("webSocketDebuggerUrl")
+                    break
+            if not ws_url and targets:
+                ws_url = targets[0].get("webSocketDebuggerUrl")
+            
+            if ws_url:
+                async with websockets.connect(ws_url) as ws:
+                    msg_id = 1
+                    ua = MOBILE_UA if is_mobile else DESKTOP_UA
+                    for method, params in [
+                        ("Emulation.setDeviceMetricsOverride", {
+                            "width": width, "height": height,
+                            "deviceScaleFactor": dpr, "mobile": is_mobile
+                        }),
+                        ("Emulation.setUserAgentOverride", {"userAgent": ua}),
+                    ]:
+                        await ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
+                        await ws.recv()
+                        msg_id += 1
+                mobile_ok = True
+    except Exception as e:
+        errors.append(f"Mobile emulation failed: {str(e)}")
+    
+    return {
+        "status": "ok" if x11_ok or win_ok else "error",
+        "width": width,
+        "height": height,
+        "is_mobile": is_mobile,
+        "device_pixel_ratio": dpr,
+        "x11_resized": x11_ok,
+        "window_resized": win_ok,
+        "mobile_emulated": mobile_ok,
+        "errors": errors,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════

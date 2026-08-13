@@ -69,6 +69,7 @@
         let touchKeyboard = null;
         let lastKeyboardInput = '';
         const DEFAULT_BUF_LEN = 100;
+        let resizeTimer = null;
 
         const screenElem = document.getElementById('screen');
         const keyboardInput = document.getElementById('noVNC_keyboardinput');
@@ -85,11 +86,63 @@
         const password = getQueryParam('password', '');
         const path = getQueryParam('path', 'websockify');
         const hideKbdBtn = getQueryParam('hide_kbd_btn', '0') === '1';
+        const userId = getQueryParam('user_id', 'default');
+        const apiKey = getQueryParam('api_key', 'surf-default-key');
 
         const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
         let wsUrl = `${wsProtocol}://${host}`;
         if (port) wsUrl += `:${port}`;
         wsUrl += `/${path}`;
+
+        // ─── Dynamic Resize & Mobile Detection ────────────────────────────────
+
+        function detectMobile() {
+            const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+            const isNarrow = window.innerWidth < 768;
+            const isTabletTouch = isTouch && window.innerWidth < 1024;
+            return isNarrow || isTabletTouch;
+        }
+
+        async function callResize(width, height, isMobile, dpr) {
+            try {
+                const resizeUrl = `${window.location.protocol}//${window.location.host}/api/resize`;
+                const resp = await fetch(resizeUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        width: width,
+                        height: height,
+                        is_mobile: isMobile,
+                        device_pixel_ratio: dpr,
+                        user_id: userId,
+                        api_key: apiKey
+                    })
+                });
+                const data = await resp.json();
+                console.log('[Surf] Resize response:', data);
+                return data;
+            } catch (e) {
+                console.warn('[Surf] Resize failed:', e);
+                return null;
+            }
+        }
+
+        async function autoResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            const isMobile = detectMobile();
+            const dpr = window.devicePixelRatio || 1;
+            console.log(`[Surf] Auto-resize: ${width}x${height}, mobile=${isMobile}, dpr=${dpr}`);
+            await callResize(width, height, isMobile, dpr);
+        }
+
+        // Debounced resize handler for window changes
+        window.addEventListener('resize', () => {
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => { autoResize(); }, 300);
+        });
+
+        // ─── RFB / VNC Connection ─────────────────────────────────────────────
 
         function initRFB() {
             rfb = new RFB(screenElem, wsUrl, {
@@ -101,6 +154,8 @@
             rfb.addEventListener('connect', () => console.log('[noVNC] Connected'));
             rfb.addEventListener('disconnect', (e) => console.log('[noVNC] Disconnected:', e.detail));
         }
+
+        // ─── Virtual Keyboard ──────────────────────────────────────────────────
 
         function resetInputBuffer() {
             keyboardInput.value = new Array(DEFAULT_BUF_LEN).join('_');
@@ -175,7 +230,18 @@
             if (hideKbdBtn) toggleBtn.classList.add('hidden');
         }
 
-        window.addEventListener('DOMContentLoaded', () => { initRFB(); initVirtualKeyboard(); });
+        // ─── Boot Sequence: resize first, then connect VNC ─────────────────────
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Resize the remote browser to match this viewport BEFORE connecting VNC
+            await autoResize();
+
+            // Small delay to let X11/Chromium settle after resize
+            setTimeout(() => {
+                initRFB();
+                initVirtualKeyboard();
+            }, 500);
+        });
     </script>
 </body>
 </html>

@@ -3,12 +3,12 @@ set -e
 
 echo "[Surf Cloud v2] Starting services..."
 
-# Start Xvfb (virtual display)
-Xvfb :99 -screen 0 1920x1920x24 -ac &
+# Start Xvfb (virtual display) with RandR extension for dynamic resize
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR &
 sleep 2
-echo "[Surf Cloud v2] Xvfb started on :99"
+echo "[Surf Cloud v2] Xvfb started on :99 (1920x1080, RandR enabled)"
 
-# Start x11vnc (VNC server)
+# Start x11vnc (VNC server) with xrandr support for dynamic resolution changes
 x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -quiet -xrandr &
 sleep 2
 echo "[Surf Cloud v2] x11vnc started on port 5900"
@@ -18,13 +18,13 @@ websockify --web=/usr/share/novnc 5800 localhost:5900 &
 sleep 2
 echo "[Surf Cloud v2] websockify started on port 5800"
 
-# Start Chromium with CDP enabled
+# Start Chromium with CDP enabled — window-size matches Xvfb default (no black bar)
 chromium --no-sandbox --disable-gpu --disable-dev-shm-usage \
     --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
     --remote-allow-origins=* --window-size=1920,1080 --window-position=0,0 \
     "https://www.google.com" &
 sleep 3
-echo "[Surf Cloud v2] Chromium started with CDP on port 9222"
+echo "[Surf Cloud v2] Chromium started with CDP on port 9222 (1920x1080)"
 
 # Start the FastAPI automation API (prefer v2)
 cd /app
