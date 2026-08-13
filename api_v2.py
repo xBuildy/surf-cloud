@@ -1067,95 +1067,105 @@ def _resize_chromium_window(width: int, height: int) -> bool:
         logger.error(f"Chromium window resize error: {e}")
         return False
 
-async def _set_mobile_emulation(page, is_mobile: bool, width: int, height: int, dpr: float):
-    """Apply CDP mobile or desktop emulation to a Playwright page."""
-    client = await page.context.new_cdp_session(page)
-    
-    if is_mobile:
-        await client.send("Emulation.setDeviceMetricsOverride", {
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": dpr,
-            "mobile": True,
-        })
-        await client.send("Emulation.setUserAgentOverride", {
-            "userAgent": MOBILE_UA,
-        })
-    else:
-        await client.send("Emulation.setDeviceMetricsOverride", {
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": dpr,
-            "mobile": False,
-        })
-        await client.send("Emulation.setUserAgentOverride", {
-            "userAgent": DESKTOP_UA,
-        })
+async def _get_shared_browser_page_targets() -> list:
+    """List CDP page targets on the SHARED visible browser (the one shown via VNC)."""
+    cdp_url = f"http://{CDP_HOST}:{CDP_PORT}/json"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(cdp_url)
+        targets = resp.json()
+    return [t for t in targets if t.get("type") == "page"]
+
+async def _cleanup_stray_windows():
+    """Close any extra page targets on the shared browser beyond the first (oldest) one.
+    This cleans up stray windows accidentally created by prior bugs / duplicate opens."""
+    try:
+        page_targets = await _get_shared_browser_page_targets()
+        if len(page_targets) <= 1:
+            return 0
+        # Keep the first target, close the rest
+        closed = 0
+        async with httpx.AsyncClient() as client:
+            for t in page_targets[1:]:
+                target_id = t.get("id")
+                if target_id:
+                    try:
+                        await client.get(f"http://{CDP_HOST}:{CDP_PORT}/json/close/{target_id}")
+                        closed += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to close stray target {target_id}: {e}")
+        return closed
+    except Exception as e:
+        logger.warning(f"Cleanup stray windows failed: {e}")
+        return 0
+
+async def _apply_emulation_to_shared_browser(width: int, height: int, is_mobile: bool, dpr: float) -> bool:
+    """Apply CDP device emulation to the SHARED visible browser's existing page —
+    never creates a new context/window. This is the browser shown via VNC."""
+    try:
+        import websockets
+        page_targets = await _get_shared_browser_page_targets()
+        if not page_targets:
+            logger.warning("No page targets found on shared browser for emulation")
+            return False
+
+        # Always target the first (original) page — never spawn a new one
+        ws_url = page_targets[0].get("webSocketDebuggerUrl")
+        if not ws_url:
+            return False
+
+        async with websockets.connect(ws_url) as ws:
+            msg_id = 1
+            ua = MOBILE_UA if is_mobile else DESKTOP_UA
+            for method, params in [
+                ("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height,
+                    "deviceScaleFactor": dpr, "mobile": is_mobile
+                }),
+                ("Emulation.setUserAgentOverride", {"userAgent": ua}),
+            ]:
+                await ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
+                await ws.recv()
+                msg_id += 1
+        return True
+    except Exception as e:
+        logger.error(f"Shared browser emulation failed: {e}")
+        return False
 
 @app.post("/api/resize")
 async def resize_session(body: ResizeRequest):
-    """Dynamically resize the browser viewport and optionally apply mobile emulation."""
+    """Dynamically resize the SHARED visible browser (shown via VNC) and optionally
+    apply mobile emulation. Never touches per-user isolated Playwright contexts —
+    those are a separate system used only by the background automation API."""
     check_api_key(body.api_key)
-    
+
     # Clamp dimensions to reasonable bounds
     width = max(320, min(3840, body.width))
     height = max(400, min(2160, body.height))
     is_mobile = body.is_mobile
     dpr = max(0.5, min(3.0, body.device_pixel_ratio))
-    
+
     errors = []
-    
+
+    # 0. Clean up any stray extra windows (defensive — handles prior bugs / duplicate opens)
+    closed_count = await _cleanup_stray_windows()
+    if closed_count:
+        logger.info(f"Closed {closed_count} stray browser window(s)")
+
     # 1. Resize X11 display
     x11_ok = _resize_x11(width, height)
     if not x11_ok:
         errors.append("X11 resize failed")
-    
+
     # 2. Resize Chromium window
     win_ok = _resize_chromium_window(width, height)
     if not win_ok:
         errors.append("Chromium window resize failed")
-    
-    # 3. Apply mobile/desktop emulation via CDP
-    mobile_ok = False
-    try:
-        if SESSION_MANAGER_AVAILABLE and session_manager:
-            page = await session_manager.get_page(body.user_id)
-            await _set_mobile_emulation(page, is_mobile, width, height, dpr)
-            mobile_ok = True
-        else:
-            # Fallback: use direct CDP websocket
-            import websockets
-            cdp_url = f"http://{CDP_HOST}:{CDP_PORT}/json"
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(cdp_url)
-                targets = resp.json()
-            
-            ws_url = None
-            for t in targets:
-                if t.get("type") == "page":
-                    ws_url = t.get("webSocketDebuggerUrl")
-                    break
-            if not ws_url and targets:
-                ws_url = targets[0].get("webSocketDebuggerUrl")
-            
-            if ws_url:
-                async with websockets.connect(ws_url) as ws:
-                    msg_id = 1
-                    ua = MOBILE_UA if is_mobile else DESKTOP_UA
-                    for method, params in [
-                        ("Emulation.setDeviceMetricsOverride", {
-                            "width": width, "height": height,
-                            "deviceScaleFactor": dpr, "mobile": is_mobile
-                        }),
-                        ("Emulation.setUserAgentOverride", {"userAgent": ua}),
-                    ]:
-                        await ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
-                        await ws.recv()
-                        msg_id += 1
-                mobile_ok = True
-    except Exception as e:
-        errors.append(f"Mobile emulation failed: {str(e)}")
-    
+
+    # 3. Apply mobile/desktop emulation via CDP to the SAME shared browser page
+    mobile_ok = await _apply_emulation_to_shared_browser(width, height, is_mobile, dpr)
+    if not mobile_ok:
+        errors.append("Mobile emulation failed")
+
     return {
         "status": "ok" if x11_ok or win_ok else "error",
         "width": width,
@@ -1165,8 +1175,17 @@ async def resize_session(body: ResizeRequest):
         "x11_resized": x11_ok,
         "window_resized": win_ok,
         "mobile_emulated": mobile_ok,
+        "stray_windows_closed": closed_count,
         "errors": errors,
     }
+
+@app.post("/api/resize/cleanup")
+async def resize_cleanup(body: dict):
+    """Manually trigger cleanup of stray duplicate browser windows."""
+    check_api_key(body.get("api_key", ""))
+    closed = await _cleanup_stray_windows()
+    remaining = await _get_shared_browser_page_targets()
+    return {"status": "ok", "closed": closed, "remaining_page_count": len(remaining)}
 
 
 
