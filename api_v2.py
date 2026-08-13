@@ -941,71 +941,93 @@ def _run_xrandr(args: list) -> str:
         logger.warning(f"xrandr {' '.join(args)} failed: {result.stderr}")
     return result.stdout
 
-def _get_xrandr_output_name() -> str:
-    """Detect the Xvfb RandR output name (usually 'default' or a screen name)."""
+def _get_xrandr_info() -> dict:
+    """Get xrandr query output for debugging."""
     try:
         env = os.environ.copy()
         env["DISPLAY"] = ":99"
         result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, env=env, timeout=10)
-        for line in result.stdout.split("\n"):
-            # Look for connected output lines (not the screen line at the bottom)
-            if " connected" in line and "Screen" not in line:
-                parts = line.split()
-                if parts:
-                    return parts[0]
-        # Fallback: try 'default'
-        return "default"
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode
+        }
     except Exception as e:
-        logger.warning(f"Could not detect RandR output name: {e}")
-        return "default"
+        return {"error": str(e)}
 
 def _resize_x11(width: int, height: int) -> bool:
-    """Resize Xvfb display via RandR. Returns True on success."""
+    """Resize Xvfb display via RandR. Tries multiple methods."""
     try:
-        output_name = _get_xrandr_output_name()
-        # Try direct mode switch first
-        mode_str = f"{width}x{height}"
-        _run_xrandr(["--output", output_name, "-s", mode_str])
-        
-        # Verify it took effect
         env = os.environ.copy()
         env["DISPLAY"] = ":99"
-        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, env=env, timeout=10)
-        if f"{width}x{height}" in result.stdout and "*" in result.stdout:
-            logger.info(f"X11 resized to {width}x{height} via direct mode switch")
-            return True
+        mode_str = f"{width}x{height}"
         
-        # If direct switch failed, try adding a new mode via cvt
-        logger.info("Direct mode switch failed, trying cvt modeline...")
+        # Method 1: Try 'xrandr -s WxH' (simplest, works on Xvfb with RandR)
+        result = subprocess.run(["xrandr", "-s", mode_str], capture_output=True, text=True, env=env, timeout=10)
+        if result.returncode == 0:
+            # Verify
+            verify = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, env=env, timeout=10)
+            if f"{width}x{height}" in verify.stdout:
+                logger.info(f"X11 resized to {width}x{height} via xrandr -s")
+                return True
+        
+        # Method 2: Try --output default --mode
+        for output_name in ["default", "Screen", "screen-0"]:
+            result = subprocess.run(
+                ["xrandr", "--output", output_name, "--mode", mode_str],
+                capture_output=True, text=True, env=env, timeout=10
+            )
+            if result.returncode == 0:
+                logger.info(f"X11 resized to {width}x{height} via --output {output_name} --mode")
+                return True
+        
+        # Method 3: Try --output default -s (with size index or resolution)
+        for output_name in ["default"]:
+            result = subprocess.run(
+                ["xrandr", "--output", output_name, "-s", mode_str],
+                capture_output=True, text=True, env=env, timeout=10
+            )
+            if result.returncode == 0:
+                logger.info(f"X11 resized to {width}x{height} via --output {output_name} -s")
+                return True
+        
+        # Method 4: Add a new mode via cvt modeline
+        logger.info("Trying cvt modeline approach...")
         cvt_result = subprocess.run(
             ["cvt", str(width), str(height)],
             capture_output=True, text=True, timeout=10
         )
-        if cvt_result.returncode == 0:
-            # Parse modeline from cvt output
+        if cvt_result.returncode == 0 and cvt_result.stdout:
             lines = cvt_result.stdout.strip().split("\n")
-            modeline_line = None
             for line in lines:
-                if "Modeline" in line or '"' in line:
-                    modeline_line = line
-                    break
-            
-            if modeline_line:
-                # Extract the modeline values
-                parts = modeline_line.split()
-                # Format: "name" hdisp hsync hss hse vdisp vsync vss vse flags
-                mode_name = f"surf_{width}x{height}"
-                # Find the quoted name in cvt output, replace with our name
-                modeline_values = parts[2:]  # After "Modeline" and the name
-                modeline_str = " ".join(modeline_values)
-                
-                _run_xrandr(["--newmode", mode_name] + modeline_values)
-                _run_xrandr(["--addmode", output_name, mode_name])
-                _run_xrandr(["--output", output_name, "--mode", mode_name])
-                logger.info(f"X11 resized to {width}x{height} via new cvt mode")
-                return True
+                if "Modeline" in line:
+                    parts = line.split()
+                    mode_name = f"surf_{width}x{height}"
+                    modeline_values = parts[2:]  # After "Modeline" and the name
+                    
+                    # Try with 'default' output
+                    _run_xrandr(["--newmode", mode_name] + modeline_values)
+                    for output_name in ["default"]:
+                        _run_xrandr(["--addmode", output_name, mode_name])
+                        result = subprocess.run(
+                            ["xrandr", "--output", output_name, "--mode", mode_name],
+                            capture_output=True, text=True, env=env, timeout=10
+                        )
+                        if result.returncode == 0:
+                            logger.info(f"X11 resized to {width}x{height} via cvt modeline")
+                            return True
         
-        logger.warning(f"Could not resize X11 to {width}x{height}")
+        # Method 5: Use xrandr --fb (framebuffer size) — forces resize without mode matching
+        result = subprocess.run(
+            ["xrandr", "--fb", f"{width}x{height}"],
+            capture_output=True, text=True, env=env, timeout=10
+        )
+        if result.returncode == 0:
+            logger.info(f"X11 resized to {width}x{height} via --fb")
+            return True
+        
+        logger.warning(f"All X11 resize methods failed for {width}x{height}")
+        logger.warning(f"xrandr query: {_get_xrandr_info()}")
         return False
     except Exception as e:
         logger.error(f"X11 resize error: {e}")
@@ -1144,6 +1166,19 @@ async def resize_session(body: ResizeRequest):
         "window_resized": win_ok,
         "mobile_emulated": mobile_ok,
         "errors": errors,
+    }
+
+
+
+
+@app.get("/api/resize/debug")
+async def resize_debug():
+    """Debug endpoint to check X11/RandR status."""
+    check_api_key(os.environ.get("SURF_API_KEY", "surf-default-key"))
+    info = _get_xrandr_info()
+    return {
+        "xrandr": info,
+        "display": os.environ.get("DISPLAY", "not set"),
     }
 
 
