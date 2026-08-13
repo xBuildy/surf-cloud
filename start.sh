@@ -14,7 +14,7 @@ sleep 2
 echo "[Surf Cloud v2] x11vnc started on port 5900"
 
 # Start websockify (WebSocket proxy for noVNC)
-websockify 5800 localhost:5900 &
+websockify --web=/usr/share/novnc 5800 localhost:5900 &
 sleep 2
 echo "[Surf Cloud v2] websockify started on port 5800"
 
