@@ -1,16 +1,19 @@
 # ============================================================
 # Wave Surf — Neko WebRTC + Chromium + CDP API
-# Uses Neko base + ensurepip for Python deps
+# Neko base has Python but no pip — install via apt first
 # ============================================================
 
 FROM m1k1o/neko:chromium
 
 USER root
 
-# Install Python pip via ensurepip (built into Python, no apt needed)
-# Then install our Python dependencies
-RUN python3 -m ensurepip --upgrade && \
-    python3 -m pip install --no-cache-dir --break-system-packages \
+# Install pip via apt (Neko base has python3 but no pip/ensurepip)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir --break-system-packages \
     fastapi==0.104.1 \
     uvicorn==0.24.0 \
     httpx==0.25.2 \
