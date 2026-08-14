@@ -1,44 +1,28 @@
 # ============================================================
-# Wave Surf — Neko WebRTC + Thorium Browser + CDP API
-# Replaces noVNC with ultra-low-latency WebRTC streaming
+# Wave Surf — Neko WebRTC + Chromium Browser + CDP API
+# Ultra-low-latency WebRTC streaming with custom Wave OS shell
 # ============================================================
 
 FROM m1k1o/neko:chromium AS base
 
-# Switch to root for installations
 USER root
 
-# Install Thorium Browser (Chromium fork with 8-38% performance gains)
-# Thorium uses same CDP protocol — all automation endpoints keep working
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg2 \
-    software-properties-common \
     python3 \
     python3-pip \
+    python3-venv \
     nginx \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Thorium from GitHub releases (latest stable)
-RUN wget -q https://github.com/Alex313031/thorium/releases/latest/download/thorium-linux-amd64.deb -O /tmp/thorium.deb || \
-    wget -q https://github.com/Alex313031/thorium/releases/download/M130/thorium-linux-amd64.deb -O /tmp/thorium.deb || \
-    echo "FALLBACK: Using vanilla Chromium"
-
-RUN if [ -f /tmp/thorium.deb ]; then \
-        apt-get install -y /tmp/thorium.deb && \
-        rm /tmp/thorium.deb && \
-        ln -sf /usr/bin/thorium-browser /usr/bin/chromium-browser && \
-        ln -sf /usr/bin/thorium-browser /usr/bin/chromium; \
-    else \
-        echo "Thorium download failed, keeping vanilla Chromium"; \
-    fi
-
-# Install Python dependencies for CDP API
-RUN pip3 install --no-cache-dir --break-system-packages \
+# Create Python venv and install dependencies (avoids --break-system-packages issues)
+RUN python3 -m venv /app/venv && \
+    /app/venv/bin/pip install --no-cache-dir \
     fastapi==0.104.1 \
     uvicorn==0.24.0 \
-    playwright==1.40.0 \
     httpx==0.25.2 \
     pydantic==2.5.2
 
