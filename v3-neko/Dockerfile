@@ -30,13 +30,17 @@ RUN apt-get update && apt-get install -y \
 # Revisit Thorium later with a verified, pinned release URL + checksum check.
 
 # Install Python dependencies for CDP API
+# NOTE: version floors (not exact pins) so pip resolves prebuilt wheels
+# compatible with this base image's Python 3.13 — the old exact pins
+# (pydantic==2.5.2 / greenlet==3.0.1 via playwright==1.40.0) had no 3.13
+# wheels and pip fell back to building from source, which failed.
 RUN pip3 install --no-cache-dir --break-system-packages \
-    fastapi==0.104.1 \
-    uvicorn==0.24.0 \
-    playwright==1.40.0 \
-    httpx==0.25.2 \
-    pydantic==2.5.2 \
-    websockets==12.0
+    "fastapi>=0.115" \
+    "uvicorn>=0.30" \
+    "playwright>=1.47" \
+    "httpx>=0.27" \
+    "pydantic>=2.9" \
+    "websockets>=13"
 
 # Create directories
 RUN mkdir -p /app/api /app/frontend /app/config /var/log/supervisor
