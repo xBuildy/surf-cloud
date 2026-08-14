@@ -1,0 +1,20 @@
+# ============================================================
+# Overrides the base image's /etc/neko/neko.yaml.
+# Switches member provider to "noauth" so the embedded WebRTC
+# viewer (loaded in our nginx-proxied iframe at /neko/) connects
+# directly without a login prompt — this is a single-user
+# automation-focused embed, not a multi-user shared session.
+# desktop/session settings are otherwise the same as the base image.
+# ============================================================
+
+desktop:
+  screen: "1920x1080@30"
+
+member:
+  provider: "noauth"
+
+session:
+  merciful_reconnect: true
+  implicit_hosting: true
+  cookie:
+    enabled: false

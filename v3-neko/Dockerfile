@@ -1,46 +1,69 @@
 # ============================================================
 # Wave Surf — Neko WebRTC + Chromium Browser + CDP API
-# Replaces noVNC with ultra-low-latency WebRTC streaming
+#
+# IMPORTANT: the base m1k1o/neko:chromium image (v3 API) already
+# ships a complete, working supervisor setup at /etc/neko/supervisord.conf
+# which [include]s /etc/neko/supervisord/*.conf. That existing setup
+# already correctly launches: Xorg (dummy display driver), dbus,
+# pulseaudio, openbox, chromium, and neko itself — all wired to the
+# same DISPLAY (:99.0 by default) and PULSE_SERVER.
+#
+# Earlier revisions of this Dockerfile threw all of that away and
+# reimplemented a second, parallel supervisor stack from scratch
+# (own /etc/supervisor/conf.d config, own chromium launch command with
+# no display/X-server wiring, own Thorium download). That's why it
+# crash-looped: chromium had no X server to attach to, and every
+# process kept restarting immediately.
+#
+# This version is purely ADDITIVE on top of the base image:
+#   - chromium.conf   -> overrides the base's own chromium program
+#                         definition, only to add CDP remote-debugging
+#                         flags (--remote-debugging-port=9222 etc) that
+#                         our automation API needs. Same display/openbox
+#                         wiring as the base image, untouched.
+#   - neko.yaml       -> overrides the base's own neko.yaml, switching
+#                         member auth to "noauth" so our iframe embed
+#                         doesn't show a login prompt.
+#   - cdp-api.conf,
+#     nginx-proc.conf -> NEW supervisor program files dropped into the
+#                         base image's own include directory, so they
+#                         start alongside (not instead of) everything
+#                         the base image already runs correctly.
+#   - NEKO_SERVER_BIND -> moved from the base image's default :8080 to
+#                         :8081, since our nginx now owns the public
+#                         8080 port (nginx.conf already expects neko on
+#                         127.0.0.1:8081).
+#
+# We deliberately do NOT override CMD — the base image's own
+# `/usr/bin/supervisord -c /etc/neko/supervisord.conf` is correct and
+# is what actually starts everything (X server included).
 # ============================================================
 
 FROM m1k1o/neko:chromium AS base
 
-# Switch to root for installations
 USER root
 
-# Base tooling for the CDP API + reverse proxy + browser.
-# NOTE: software-properties-common removed — not used (no add-apt-repository
-# calls in this Dockerfile) and unavailable in the current base image's
-# Debian trixie repos, which was breaking the build (exit code 100).
-# NOTE: explicitly installing the `chromium` Debian package + symlinking it
-# to /usr/bin/chromium-browser. Previously this Dockerfile downloaded Thorium
-# from GitHub releases and relied on that install step to create the
-# chromium-browser symlink; when the Thorium download started failing (see
-# below) that symlink silently stopped being created, and neko/supervisord
-# crash-looped at runtime with "can't find command '/usr/bin/chromium-browser'".
-# Installing chromium directly here removes that hidden dependency entirely.
+# Only add what the base image doesn't already have: pip (for our
+# Python CDP API) and nginx (our reverse proxy / public entrypoint).
+# Everything browser/X11/audio-related is already in the base image.
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg2 \
-    python3 \
     python3-pip \
     nginx \
-    supervisor \
-    chromium \
-    && ln -sf /usr/bin/chromium /usr/bin/chromium-browser \
     && apt-get clean
 
-# NOTE: Thorium install disabled for now. The GitHub release wget attempts
-# were silently creating an invalid/empty /tmp/thorium.deb on 404 (wget
-# still writes -O output even on failure), which then failed `apt-get install`
-# with "could not locate member control.tar" and broke every build.
-# Shipping on the Debian `chromium` package (same CDP protocol, all
-# automation endpoints work identically) to get Surf Cloud live now.
-# Revisit Thorium later with a verified, pinned release URL + checksum check.
+# Override the base image's chromium program def (adds CDP flags) and
+# neko.yaml (adds noauth) — see header comment above.
+COPY chromium.conf /etc/neko/supervisord/chromium.conf
+COPY neko.yaml /etc/neko/neko.yaml
 
-# Install Python dependencies for CDP API
+# New supervisor programs (additive — merge into the base image's own
+# /etc/neko/supervisord.conf [include] directory).
+COPY cdp-api.conf /etc/neko/supervisord/cdp-api.conf
+COPY nginx-proc.conf /etc/neko/supervisord/nginx-proc.conf
+
+# Python dependencies for the CDP API.
 # NOTE: version floors (not exact pins) so pip resolves prebuilt wheels
-# compatible with this base image's Python 3.13 — the old exact pins
+# compatible with this base image's Python 3.13 — exact old pins
 # (pydantic==2.5.2 / greenlet==3.0.1 via playwright==1.40.0) had no 3.13
 # wheels and pip fell back to building from source, which failed.
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
@@ -51,38 +74,30 @@ RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
     "pydantic>=2.9" \
     "websockets>=13"
 
-# Create directories
-RUN mkdir -p /app/api /app/frontend /app/config /var/log/supervisor
+RUN mkdir -p /app/api /app/frontend
 
-# Copy CDP API
+# CDP Automation API
 COPY api_v2.py /app/api/api_v2.py
 COPY ai_resolver.py /app/api/ai_resolver.py
 COPY session_store.py /app/api/session_store.py
 
-# Copy custom Wave OS frontend shell
+# Custom Wave OS frontend shell
 COPY frontend/ /app/frontend/
 
-# Copy configs
+# nginx site config (public entrypoint on :8080 — proxies to the
+# frontend shell, the CDP API on :8000, Neko WebRTC on :8081, and
+# Chromium's raw CDP port :9222)
 COPY nginx.conf /etc/nginx/sites-available/default
-COPY supervisord.conf /etc/supervisor/conf.d/surf-neko.conf
-COPY start.sh /app/start.sh
 
-RUN chmod +x /app/start.sh
-
-# Environment variables
-ENV NEKO_SCREEN=1920x1080@30
-ENV NEKO_AUDIO_BITRATE=128
-ENV NEKO_VIDEO_BITRATE=4000
-ENV NEKO_MAX_FPS=60
-ENV NEKO_PASSWORD=wave-surf
-ENV NEKO_ADMIN_PASSWORD=wave-admin
-ENV NEKO_CONTROL_PROTECTION=false
-ENV NEKO_IMPLICIT_CONTROL=true
-ENV NEKO_LOCK_RGBA=false
-ENV CHROMIUM_ARGS="--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=* --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --force-device-scale-factor=1"
+# Move Neko off the base image's default :8080 (nginx now owns that
+# port) onto :8081, matching what nginx.conf already expects.
+ENV NEKO_SERVER_BIND=:8081
 
 EXPOSE 8080 9222
 
 USER root
 
-CMD ["/app/start.sh"]
+# CMD intentionally not overridden — inherits the base image's own
+# `/usr/bin/supervisord -c /etc/neko/supervisord.conf`, which starts
+# Xorg + dbus + pulseaudio + openbox + chromium + neko together
+# correctly, plus our two additive programs (cdp-api, nginx).
