@@ -7,10 +7,14 @@ All automation endpoints talk to CDP on localhost:9222
 import json
 import asyncio
 import httpx
+import websockets
 from fastapi import FastAPI, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from pydantic import BaseModel
+
+import session_store
+import ai_resolver
 
 app = FastAPI(title="Wave Surf CDP API", version="2.0")
 
@@ -22,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CDP_URL = "http://localhost:9222"
+CDP_URL = "http://127.0.0.1:9222"
 
 # ===== Models =====
 
@@ -65,29 +69,50 @@ class ResizeRequest(BaseModel):
 
 async def cdp_send(method: str, params: dict = None, session_id: str = None):
     """Send a CDP command to the browser."""
-    async with httpx.AsyncClient() as client:
-        # Get the first browser target
-        targets_res = await client.get(f"{CDP_URL}/json")
-        targets = targets_res.json()
-        page_target = next((t for t in targets if t["type"] == "page"), None)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            targets_res = await client.get(f"{CDP_URL}/json")
+            targets = targets_res.json()
+        except Exception as e:
+            return {"error": f"Failed to connect to CDP: {e}"}
+        
+        page_target = next((t for t in targets if isinstance(t, dict) and t.get("type") == "page"), None)
+        
         if not page_target:
-            return {"error": "No page target found"}
+            try:
+                new_res = await client.get(f"{CDP_URL}/json/new")
+                page_target = new_res.json()
+            except Exception as e:
+                return {"error": f"No page target found and failed to create new target: {e}"}
         
-        # Connect via WebSocket to the page target
-        ws_url = page_target["webSocketDebuggerUrl"]
+        ws_url = page_target.get("webSocketDebuggerUrl")
+        if not ws_url:
+            return {"error": "Page target has no webSocketDebuggerUrl"}
         
-        # Use HTTP-based CDP commands instead (simpler for Railway)
-        # Actually, we need WebSocket for CDP — use websockets lib
-        import websockets
-        async with websockets.connect(ws_url) as ws:
-            msg = {
-                "id": 1,
-                "method": method,
-                "params": params or {}
-            }
-            await ws.send(json.dumps(msg))
-            resp = await asyncio.wait_for(ws.recv(), timeout=30)
-            return json.loads(resp)
+        ws_url = ws_url.replace("localhost", "127.0.0.1")
+        
+        try:
+            async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
+                msg_id = 1
+                msg = {
+                    "id": msg_id,
+                    "method": method,
+                    "params": params or {}
+                }
+                await ws.send(json.dumps(msg))
+                
+                start_time = asyncio.get_event_loop().time()
+                while True:
+                    remaining = 15.0 - (asyncio.get_event_loop().time() - start_time)
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError("CDP response timeout")
+                    resp_str = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                    resp = json.loads(resp_str)
+                    if resp.get("id") == msg_id:
+                        return resp
+        except Exception as e:
+            err_msg = str(e) or type(e).__name__
+            return {"error": f"CDP connection failed: {err_msg}"}
 
 async def cdp_evaluate(expression: str):
     """Evaluate a JavaScript expression in the current page."""
@@ -95,17 +120,18 @@ async def cdp_evaluate(expression: str):
         "expression": expression,
         "returnByValue": True
     })
-    if "result" in result and "result" in result["result"]:
+    if isinstance(result, dict) and "result" in result and "result" in result["result"]:
         return result["result"]["result"].get("value")
     return None
 
 # ===== Endpoints =====
 
 @app.get("/health")
+@app.get("/api/health")
 async def health():
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(f"{CDP_URL}/json/version", timeout=5)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(f"{CDP_URL}/json/version")
             version = res.json()
             return {
                 "status": "ok",
@@ -115,17 +141,24 @@ async def health():
                 "webrtc": "neko"
             }
     except Exception as e:
-        return {"status": "error", "message": str(e), "cdp": "disconnected"}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg, "cdp": "disconnected"}
 
 @app.post("/navigate")
+@app.post("/api/navigate")
 async def navigate(req: NavigateRequest):
     try:
+        session_store.store.add_to_history(req.user_id, req.url)
         result = await cdp_send("Page.navigate", {"url": req.url})
+        if isinstance(result, dict) and "error" in result:
+            return {"status": "error", "message": result["error"]}
         return {"status": "ok", "url": req.url}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/click")
+@app.post("/api/click")
 async def click(req: ClickRequest):
     try:
         js = f"""
@@ -138,9 +171,11 @@ async def click(req: ClickRequest):
         result = await cdp_evaluate(js)
         return {"status": "ok" if result else "error", "clicked": bool(result)}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/type")
+@app.post("/api/type")
 async def type_text(req: TypeRequest):
     try:
         js = f"""
@@ -159,123 +194,82 @@ async def type_text(req: TypeRequest):
         result = await cdp_evaluate(js)
         return {"status": "ok" if result else "error", "typed": bool(result)}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.get("/content")
+@app.get("/api/content")
 async def get_content(user_id: Optional[str] = "demo"):
     try:
         js = "document.body.innerText"
         content = await cdp_evaluate(js)
         return {"status": "ok", "content": content or ""}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/observe")
+@app.post("/api/observe")
 async def observe(req: ObserveRequest):
-    """AI-powered element resolution — finds elements by natural language description."""
     try:
-        # Get page content for context
-        content = await cdp_evaluate("document.body.innerHTML.substring(0, 5000)")
-        
-        # Call Wave Assistant (Theta EdgeCloud GLM-5.2) for element resolution
-        async with httpx.AsyncClient() as client:
-            res = await client.post(
-                "https://ai.thetaedgecloud.com/v1/chat/completions",
-                json={
-                    "model": "glm-5.2",
-                    "messages": [
-                        {"role": "system", "content": "You are a browser automation assistant. Given a page description and an instruction, return the CSS selector for the element the user wants to interact with. Return ONLY the CSS selector, nothing else."},
-                        {"role": "user", "content": f"Instruction: {req.instruction}\n\nPage HTML (first 5000 chars):\n{content}"}
-                    ],
-                    "max_tokens": 100
-                },
-                headers={"Authorization": "Bearer surf-default-key"},
-                timeout=20
-            )
-            data = res.json()
-            selector = data["choices"][0]["message"]["content"].strip()
-        
-        return {"status": "ok", "elements": [{"description": req.instruction, "selector": selector, "method": "css"}]}
+        content = await cdp_evaluate("document.body.innerHTML.substring(0, 5000)") or ""
+        selector = await ai_resolver.resolve_element(req.instruction, content)
+        if selector:
+            return {"status": "ok", "elements": [{"description": req.instruction, "selector": selector, "method": "css"}]}
+        return {"status": "error", "message": "Could not resolve element"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/act")
+@app.post("/api/act")
 async def act(req: ActRequest):
-    """AI-driven action — performs a browser action described in natural language."""
     try:
-        # First observe to find the element
         observe_result = await observe(ObserveRequest(instruction=req.instruction, user_id=req.user_id))
-        if observe_result["status"] != "ok":
+        if observe_result.get("status") != "ok":
             return observe_result
         
-        elements = observe_result["elements"]
+        elements = observe_result.get("elements", [])
         if elements and len(elements) > 0:
             selector = elements[0]["selector"]
-            # Try clicking
             click_result = await click(ClickRequest(selector=selector, user_id=req.user_id))
             return {"status": "ok", "action": "click", "selector": selector, "result": click_result}
         
         return {"status": "error", "message": "Could not resolve element for action"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/extract")
+@app.post("/api/extract")
 async def extract(req: ExtractRequest):
-    """AI-powered structured data extraction from current page."""
     try:
-        # Get page content
-        content = await cdp_evaluate("document.body.innerText")
-        
-        # Call Wave Assistant for extraction
-        async with httpx.AsyncClient() as client:
-            res = await client.post(
-                "https://ai.thetaedgecloud.com/v1/chat/completions",
-                json={
-                    "model": "glm-5.2",
-                    "messages": [
-                        {"role": "system", "content": f"Extract data from the page based on the instruction. Return a JSON array of objects. Max {req.max_results} results."},
-                        {"role": "user", "content": f"Instruction: {req.instruction}\n\nPage content:\n{content[:10000]}"}
-                    ],
-                    "max_tokens": 2000
-                },
-                headers={"Authorization": "Bearer surf-default-key"},
-                timeout=30
-            )
-            data = res.json()
-            response_text = data["choices"][0]["message"]["content"]
-        
-        # Try to parse JSON from response
-        try:
-            # Find JSON array in response
-            start = response_text.find("[")
-            end = response_text.rfind("]") + 1
-            if start >= 0 and end > start:
-                extracted = json.loads(response_text[start:end])
-            else:
-                extracted = [{"raw": response_text}]
-        except:
-            extracted = [{"raw": response_text}]
-        
-        return {"status": "ok", "data": extracted[:req.max_results]}
+        content = await cdp_evaluate("document.body.innerText") or ""
+        extracted = await ai_resolver.extract_data(req.instruction, content, req.max_results or 5)
+        return {"status": "ok", "data": extracted}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.get("/screenshot")
+@app.get("/api/screenshot")
 async def screenshot(user_id: Optional[str] = "demo"):
     try:
         result = await cdp_send("Page.captureScreenshot", {"format": "png"})
-        if "result" in result and "data" in result["result"]:
+        if isinstance(result, dict) and "result" in result and "data" in result["result"]:
             import base64
             img_data = base64.b64decode(result["result"]["data"])
             return Response(content=img_data, media_type="image/png")
         return {"status": "error", "message": "Screenshot failed"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/resize")
+@app.post("/api/resize")
 async def resize(req: ResizeRequest):
     try:
-        await cdp_send("Emulation.setDeviceMetricsOverride", {
+        result = await cdp_send("Emulation.setDeviceMetricsOverride", {
             "width": req.width,
             "height": req.height,
             "deviceScaleFactor": 1,
@@ -283,52 +277,26 @@ async def resize(req: ResizeRequest):
         })
         return {"status": "ok", "width": req.width, "height": req.height}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/automate")
+@app.post("/api/automate")
 async def automate(req: AutomateRequest):
-    """Full automation task — routes to Wave Assistant for planning, then executes steps."""
     try:
-        # Call Wave Assistant for task planning
-        async with httpx.AsyncClient() as client:
-            res = await client.post(
-                "https://ai.thetaedgecloud.com/v1/chat/completions",
-                json={
-                    "model": "glm-5.2",
-                    "messages": [
-                        {"role": "system", "content": "You are a browser automation assistant. Break down the user's task into a sequence of browser actions. Return a JSON array of step objects with 'action' (navigate/click/type/extract/screenshot) and relevant params."},
-                        {"role": "user", "content": req.task}
-                    ],
-                    "max_tokens": 1000
-                },
-                headers={"Authorization": "Bearer surf-default-key"},
-                timeout=30
-            )
-            data = res.json()
-            plan_text = data["choices"][0]["message"]["content"]
-        
-        # Parse the plan
-        try:
-            start = plan_text.find("[")
-            end = plan_text.rfind("]") + 1
-            steps = json.loads(plan_text[start:end]) if start >= 0 else []
-        except:
-            steps = []
-        
-        # Execute steps
+        plan = await ai_resolver.plan_task(req.task)
         results = []
-        for step in steps:
-            action = step.get("action", "")
-            if action == "navigate":
-                r = await navigate(NavigateRequest(url=step.get("url", ""), user_id=req.user_id))
-            elif action == "click":
-                r = await click(ClickRequest(selector=step.get("selector", ""), user_id=req.user_id))
-            elif action == "type":
-                r = await type_text(TypeRequest(selector=step.get("selector", ""), text=step.get("text", ""), user_id=req.user_id))
-            elif action == "extract":
-                r = await extract(ExtractRequest(instruction=step.get("instruction", ""), user_id=req.user_id))
-            elif action == "screenshot":
-                r = {"status": "ok", "action": "screenshot"}
+        for step in plan:
+            action = step.get("action")
+            if action == "navigate" and "url" in step:
+                r = await navigate(NavigateRequest(url=step["url"], user_id=req.user_id))
+            elif action == "click" and "selector" in step:
+                r = await click(ClickRequest(selector=step["selector"], user_id=req.user_id))
+            elif action == "type" and "selector" in step and "text" in step:
+                r = await type_text(TypeRequest(selector=step["selector"], text=step["text"], user_id=req.user_id))
+            elif action == "wait":
+                await asyncio.sleep(step.get("duration", 1))
+                r = {"status": "ok"}
             else:
                 r = {"status": "skipped", "action": action}
             results.append({"action": action, "result": r.get("status", "unknown")})
@@ -339,129 +307,50 @@ async def automate(req: AutomateRequest):
             "steps": results
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/back")
+@app.post("/api/back")
 async def back(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("history.back()")
         return {"status": "ok"}
-    except:
-        return {"status": "error"}
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/forward")
+@app.post("/api/forward")
 async def forward(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("history.forward()")
         return {"status": "ok"}
-    except:
-        return {"status": "error"}
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.post("/reload")
+@app.post("/api/reload")
 async def reload(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("location.reload()")
         return {"status": "ok"}
-    except:
-        return {"status": "error"}
-
-# ===== Session Management =====
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 @app.delete("/session/destroy")
+@app.delete("/api/session/destroy")
 async def destroy_session(user_id: Optional[str] = "demo"):
-    """Close the browser session."""
     try:
         await cdp_send("Browser.close")
+        session_store.store.destroy_session(user_id)
         return {"status": "ok"}
-    except:
-        return {"status": "error"}
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# ===== Static Frontend + Neko Proxy (replaces nginx) =====
-
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
-from starlette.websockets import WebSocket, WebSocketDisconnect
-
-NEKO_URL = "http://localhost:8081"
-
-# Proxy HTTP requests to Neko (for Neko's internal API/assets)
-@app.api_route("/neko/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def proxy_neko(path: str, request: Request):
-    async with httpx.AsyncClient() as client:
-        url = f"{NEKO_URL}/{path}"
-        # Forward query params
-        if request.url.query:
-            url += f"?{request.url.query}"
-        try:
-            res = await client.request(
-                request.method,
-                url,
-                headers=dict(request.headers),
-                content=await request.body(),
-                timeout=30
-            )
-            return Response(
-                content=res.content,
-                status_code=res.status_code,
-                headers=dict(res.headers),
-                media_type=res.headers.get("content-type")
-            )
-        except Exception as e:
-            return {"status": "error", "message": f"Neko proxy error: {str(e)}"}
-
-# WebSocket proxy for Neko WebRTC signaling
-@app.websocket("/ws")
-async def proxy_neko_ws(ws: WebSocket):
-    await ws.accept()
-    try:
-        async with httpx.AsyncClient() as client:
-            # Neko uses WebSocket for WebRTC signaling
-            # We need to bridge the connection
-            import websockets
-            neko_ws_url = "ws://localhost:8081/ws"
-            async with websockets.connect(neko_ws_url) as neko_ws:
-                async def forward_to_neko():
-                    try:
-                        while True:
-                            data = await ws.receive_bytes()
-                            await neko_ws.send(data)
-                    except WebSocketDisconnect:
-                        pass
-                
-                async def forward_to_client():
-                    try:
-                        while True:
-                            data = await neko_ws.recv()
-                            if isinstance(data, str):
-                                await ws.send_text(data)
-                            else:
-                                await ws.send_bytes(data)
-                    except:
-                        pass
-                
-                await asyncio.gather(forward_to_neko(), forward_to_client())
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        try:
-            await ws.close()
-        except:
-            pass
-
-# Serve custom Wave OS frontend shell (must be last — catch-all)
-@app.get("/{full_path:path}")
-async def serve_frontend(full_path: str):
-    file_path = f"/app/frontend/{full_path}"
-    import os
-    if os.path.isfile(file_path):
-        return FileResponse(file_path)
-    # SPA fallback to index.html
-    index = "/app/frontend/index.html"
-    if os.path.isfile(index):
-        return FileResponse(index)
-    return {"status": "ok", "service": "Wave Surf CDP API", "endpoints": ["/health", "/navigate", "/click", "/type", "/content", "/observe", "/act", "/extract", "/screenshot", "/resize", "/neko/"]}
-
