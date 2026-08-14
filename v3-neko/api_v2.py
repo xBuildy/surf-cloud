@@ -379,3 +379,89 @@ async def destroy_session(user_id: Optional[str] = "demo"):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ===== Static Frontend + Neko Proxy (replaces nginx) =====
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.websockets import WebSocket, WebSocketDisconnect
+
+NEKO_URL = "http://localhost:8081"
+
+# Proxy HTTP requests to Neko (for Neko's internal API/assets)
+@app.api_route("/neko/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_neko(path: str, request: Request):
+    async with httpx.AsyncClient() as client:
+        url = f"{NEKO_URL}/{path}"
+        # Forward query params
+        if request.url.query:
+            url += f"?{request.url.query}"
+        try:
+            res = await client.request(
+                request.method,
+                url,
+                headers=dict(request.headers),
+                content=await request.body(),
+                timeout=30
+            )
+            return Response(
+                content=res.content,
+                status_code=res.status_code,
+                headers=dict(res.headers),
+                media_type=res.headers.get("content-type")
+            )
+        except Exception as e:
+            return {"status": "error", "message": f"Neko proxy error: {str(e)}"}
+
+# WebSocket proxy for Neko WebRTC signaling
+@app.websocket("/ws")
+async def proxy_neko_ws(ws: WebSocket):
+    await ws.accept()
+    try:
+        async with httpx.AsyncClient() as client:
+            # Neko uses WebSocket for WebRTC signaling
+            # We need to bridge the connection
+            import websockets
+            neko_ws_url = "ws://localhost:8081/ws"
+            async with websockets.connect(neko_ws_url) as neko_ws:
+                async def forward_to_neko():
+                    try:
+                        while True:
+                            data = await ws.receive_bytes()
+                            await neko_ws.send(data)
+                    except WebSocketDisconnect:
+                        pass
+                
+                async def forward_to_client():
+                    try:
+                        while True:
+                            data = await neko_ws.recv()
+                            if isinstance(data, str):
+                                await ws.send_text(data)
+                            else:
+                                await ws.send_bytes(data)
+                    except:
+                        pass
+                
+                await asyncio.gather(forward_to_neko(), forward_to_client())
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await ws.close()
+        except:
+            pass
+
+# Serve custom Wave OS frontend shell (must be last — catch-all)
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    file_path = f"/app/frontend/{full_path}"
+    import os
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    # SPA fallback to index.html
+    index = "/app/frontend/index.html"
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return {"status": "ok", "service": "Wave Surf CDP API", "endpoints": ["/health", "/navigate", "/click", "/type", "/content", "/observe", "/act", "/extract", "/screenshot", "/resize", "/neko/"]}
+
