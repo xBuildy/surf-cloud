@@ -8,10 +8,17 @@ FROM m1k1o/neko:chromium AS base
 # Switch to root for installations
 USER root
 
-# Base tooling for the CDP API + reverse proxy.
+# Base tooling for the CDP API + reverse proxy + browser.
 # NOTE: software-properties-common removed — not used (no add-apt-repository
 # calls in this Dockerfile) and unavailable in the current base image's
 # Debian trixie repos, which was breaking the build (exit code 100).
+# NOTE: explicitly installing the `chromium` Debian package + symlinking it
+# to /usr/bin/chromium-browser. Previously this Dockerfile downloaded Thorium
+# from GitHub releases and relied on that install step to create the
+# chromium-browser symlink; when the Thorium download started failing (see
+# below) that symlink silently stopped being created, and neko/supervisord
+# crash-looped at runtime with "can't find command '/usr/bin/chromium-browser'".
+# Installing chromium directly here removes that hidden dependency entirely.
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg2 \
@@ -19,14 +26,16 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     nginx \
     supervisor \
-    && rm -rf /var/lib/apt/lists/*
+    chromium \
+    && ln -sf /usr/bin/chromium /usr/bin/chromium-browser \
+    && apt-get clean
 
 # NOTE: Thorium install disabled for now. The GitHub release wget attempts
 # were silently creating an invalid/empty /tmp/thorium.deb on 404 (wget
 # still writes -O output even on failure), which then failed `apt-get install`
 # with "could not locate member control.tar" and broke every build.
-# Shipping on the base image's bundled vanilla Chromium (same CDP protocol,
-# all automation endpoints work identically) to get Surf Cloud live now.
+# Shipping on the Debian `chromium` package (same CDP protocol, all
+# automation endpoints work identically) to get Surf Cloud live now.
 # Revisit Thorium later with a verified, pinned release URL + checksum check.
 
 # Install Python dependencies for CDP API
