@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y \
 # compatible with this base image's Python 3.13 — the old exact pins
 # (pydantic==2.5.2 / greenlet==3.0.1 via playwright==1.40.0) had no 3.13
 # wheels and pip fell back to building from source, which failed.
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
     "fastapi>=0.115" \
     "uvicorn>=0.30" \
     "playwright>=1.47" \
