@@ -10,10 +10,12 @@ USER root
 
 # Install Thorium Browser (Chromium fork with 8-38% performance gains)
 # Thorium uses same CDP protocol — all automation endpoints keep working
+# NOTE: software-properties-common removed — not used (no add-apt-repository
+# calls in this Dockerfile) and unavailable in the current base image's
+# Debian trixie repos, which was breaking the build (exit code 100).
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg2 \
-    software-properties-common \
     python3 \
     python3-pip \
     nginx \
