@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  wave-search:
+    build: .
+    container_name: wave-search
+    ports:
+      - "8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=https://wave-search-production.up.railway.app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

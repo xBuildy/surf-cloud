@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  meili-search:
+    build: ./meili
+    container_name: wave-meili-search
+    ports:
+      - "7700:7700"
+    environment:
+      - MEILI_HOST=0.0.0.0:7700
+      - MEILI_ENV=production
+      - MEILI_MASTER_KEY=wave-meili-master-key-2026
+      - MEILI_NO_ANALYTICS=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
