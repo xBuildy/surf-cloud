@@ -144,6 +144,23 @@ async def health():
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg, "cdp": "disconnected"}
 
+@app.get("/debug/targets")
+async def debug_targets():
+    """Temporary diagnostic endpoint: raw CDP target list + version info."""
+    out = {}
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            v = await client.get(f"{CDP_URL}/json/version")
+            out["version"] = v.json()
+        except Exception as e:
+            out["version_error"] = str(e)
+        try:
+            t = await client.get(f"{CDP_URL}/json")
+            out["targets"] = t.json()
+        except Exception as e:
+            out["targets_error"] = str(e)
+    return out
+
 @app.post("/navigate")
 @app.post("/api/navigate")
 async def navigate(req: NavigateRequest):
