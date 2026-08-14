@@ -1,6 +1,6 @@
 # ============================================================
 # Wave Surf — Neko WebRTC + Chromium + CDP API
-# Neko base has Python 3.13 (Trixie) — use latest pydantic for 3.13 wheels
+# Neko base (Debian Trixie, Python 3.13) — install pip deps carefully
 # ============================================================
 
 FROM m1k1o/neko:chromium
@@ -12,9 +12,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies — use --only-binary for pydantic to avoid Rust build
-# Pin pydantic >=2.9 for Python 3.13 wheel availability
-RUN pip3 install --no-cache-dir --break-system-packages \
+# Install Python dependencies
+# --ignore-installed: don't try to uninstall Debian-managed packages (typing_extensions etc.)
+# --break-system-packages: required on Trixie (PEP 668)
+# --only-binary: prefer pre-built wheels (no Rust compiler in base)
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed --only-binary=:all: \
     fastapi==0.115.0 \
     uvicorn==0.30.0 \
     httpx==0.27.0 \
