@@ -76,7 +76,21 @@ async def cdp_send(method: str, params: dict = None, session_id: str = None):
         except Exception as e:
             return {"error": f"Failed to connect to CDP: {e}"}
         
-        page_target = next((t for t in targets if isinstance(t, dict) and t.get("type") == "page"), None)
+        # Pick a real browsing tab, not an extension's own page target.
+        # The base image force-installs a couple of extensions (SponsorBlock,
+        # etc. via /etc/chromium/policies/managed/policies.json) and their
+        # background/help pages register as CDP type=="page" targets too —
+        # often listed BEFORE the actual "New Tab" / user tab. Sending
+        # Page.navigate to one of those extension pages just hangs forever
+        # (no frame ever attaches), which is exactly why every /navigate
+        # call was timing out after 15s despite CDP being "connected".
+        page_target = next(
+            (t for t in targets
+             if isinstance(t, dict)
+             and t.get("type") == "page"
+             and not t.get("url", "").startswith("chrome-extension://")),
+            None
+        )
         
         if not page_target:
             try:
