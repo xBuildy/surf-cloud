@@ -145,6 +145,7 @@ async def health():
         return {"status": "error", "message": err_msg, "cdp": "disconnected"}
 
 @app.get("/debug/targets")
+@app.get("/api/debug/targets")
 async def debug_targets():
     """Temporary diagnostic endpoint: raw CDP target list + version info."""
     out = {}
