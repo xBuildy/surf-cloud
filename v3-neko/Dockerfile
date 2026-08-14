@@ -1,5 +1,5 @@
 # ============================================================
-# Wave Surf — Neko WebRTC + Thorium Browser + CDP API
+# Wave Surf — Neko WebRTC + Chromium Browser + CDP API
 # Replaces noVNC with ultra-low-latency WebRTC streaming
 # ============================================================
 
@@ -8,8 +8,7 @@ FROM m1k1o/neko:chromium AS base
 # Switch to root for installations
 USER root
 
-# Install Thorium Browser (Chromium fork with 8-38% performance gains)
-# Thorium uses same CDP protocol — all automation endpoints keep working
+# Base tooling for the CDP API + reverse proxy.
 # NOTE: software-properties-common removed — not used (no add-apt-repository
 # calls in this Dockerfile) and unavailable in the current base image's
 # Debian trixie repos, which was breaking the build (exit code 100).
@@ -22,19 +21,13 @@ RUN apt-get update && apt-get install -y \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Thorium from GitHub releases (latest stable)
-RUN wget -q https://github.com/Alex313031/thorium/releases/latest/download/thorium-linux-amd64.deb -O /tmp/thorium.deb || \
-    wget -q https://github.com/Alex313031/thorium/releases/download/M130/thorium-linux-amd64.deb -O /tmp/thorium.deb || \
-    echo "FALLBACK: Using vanilla Chromium"
-
-RUN if [ -f /tmp/thorium.deb ]; then \
-        apt-get install -y /tmp/thorium.deb && \
-        rm /tmp/thorium.deb && \
-        ln -sf /usr/bin/thorium-browser /usr/bin/chromium-browser && \
-        ln -sf /usr/bin/thorium-browser /usr/bin/chromium; \
-    else \
-        echo "Thorium download failed, keeping vanilla Chromium"; \
-    fi
+# NOTE: Thorium install disabled for now. The GitHub release wget attempts
+# were silently creating an invalid/empty /tmp/thorium.deb on 404 (wget
+# still writes -O output even on failure), which then failed `apt-get install`
+# with "could not locate member control.tar" and broke every build.
+# Shipping on the base image's bundled vanilla Chromium (same CDP protocol,
+# all automation endpoints work identically) to get Surf Cloud live now.
+# Revisit Thorium later with a verified, pinned release URL + checksum check.
 
 # Install Python dependencies for CDP API
 RUN pip3 install --no-cache-dir --break-system-packages \
