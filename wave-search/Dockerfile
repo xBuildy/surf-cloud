@@ -3,11 +3,11 @@ FROM searxng/searxng:latest
 # Copy custom settings
 COPY searxng-settings.yml /etc/searxng/settings.yml
 
-# Create Wave OS dark theme
-RUN mkdir -p /usr/local/searxng-src/searx/static/themes/wave/css
+# Create Wave OS dark theme CSS as an additional stylesheet
+# We inject it into the simple theme's static dir so it loads alongside the default
+RUN mkdir -p /usr/local/searxng-src/searx/static/themes/simple/css
 
-# Wave OS dark theme CSS - reskin SearXNG with Wave OS aesthetic
-RUN cat > /usr/local/searxng-src/searx/static/themes/wave/css/wave-dark.css << 'CSSEOF'
+RUN cat > /usr/local/searxng-src/searx/static/themes/simple/css/wave-dark.css << 'CSSEOF'
 :root {
   --wave-bg: #0a0a0b;
   --wave-surface: #131316;
@@ -179,17 +179,6 @@ a:hover {
   display: none !important;
 }
 
-.wave-brand {
-  font-size: 22px !important;
-  font-weight: 700 !important;
-  color: var(--wave-text) !important;
-  letter-spacing: -0.5px !important;
-}
-
-.wave-brand span {
-  color: var(--wave-accent) !important;
-}
-
 #footer {
   background: var(--wave-surface) !important;
   border-top: 1px solid var(--wave-border) !important;
@@ -224,26 +213,9 @@ a:hover {
 }
 CSSEOF
 
-# Create the wave theme template directory
-RUN mkdir -p /usr/local/searxng-src/searx/templates/wave
-
-# Copy the simple theme as the wave theme base (we'll override CSS)
-RUN cp -r /usr/local/searxng-src/searx/templates/simple/* /usr/local/searxng-src/searx/templates/wave/ 2>/dev/null || true
-
-# Add Wave Search branding header injection
-RUN cat > /usr/local/searxng-src/searx/templates/wave/base.html << 'HTMLEOF'
-{% extends "simple/base.html" %}
-{% block head %}
-{{ super() }}
-<link rel="stylesheet" href="{{ url_for('static', filename='themes/wave/css/wave-dark.css') }}" type="text/css" />
-{% endblock %}
-{% block header %}
-<div class="center">
-  <div class="wave-brand">Wave<span>Search</span></div>
-</div>
-{{ super() }}
-{% endblock %}
-HTMLEOF
+# Inject our CSS into the simple theme's base template
+RUN sed -i '/<\/head>/i <link rel="stylesheet" href="{{ url_for("static", filename="themes/simple/css/wave-dark.css") }}" type="text/css" />' \
+    /usr/local/searxng-src/searx/templates/simple/base.html 2>/dev/null || true
 
 EXPOSE 8080
 

@@ -28,9 +28,9 @@ ui:
   query_in_title: true
   infinite_scroll: true
   center_alignment: true
-  default_theme: "wave"
+  default_theme: "simple"
   theme_args:
-    style: "wave-dark"
+    style: "auto"
 
 redis:
   url: false
@@ -52,32 +52,11 @@ engines:
     engine: wikipedia
     shortcut: wp
     disabled: false
-  - name: github
-    engine: github
-    shortcut: gh
+  - name: brave
+    engine: brave
+    shortcut: br
     disabled: false
-  - name: stackoverflow
-    engine: stackoverflow
-    shortcut: so
+  - name: startpage
+    engine: startpage
+    shortcut: sp
     disabled: false
-  - name: arxiv
-    engine: arxiv
-    shortcut: ar
-    disabled: false
-  - name: reddit
-    engine: reddit
-    shortcut: re
-    disabled: false
-  - name: youtube
-    engine: youtube
-    shortcut: yt
-    disabled: false
-  - name: news
-    engine: news
-    shortcut: nw
-    disabled: false
-
-outgoing:
-  request_timeout: 10.0
-  max_request_timeout: 15.0
-  useragent_suffix: "Wave Search"
