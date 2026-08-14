@@ -1,0 +1,510 @@
+/* ============================================================
+   Wave Surf — Custom Wave OS Dark Theme
+   Replaces Neko's default UI with Wave OS aesthetic
+   ============================================================ */
+
+:root {
+  --wave-bg: #0a0a0b;
+  --wave-surface: #131316;
+  --wave-surface-hover: #1a1a20;
+  --wave-border: #1e1e24;
+  --wave-text: #e4e4e7;
+  --wave-muted: #71717a;
+  --wave-accent: #3b82f6;
+  --wave-accent-hover: #2563eb;
+  --wave-accent-soft: rgba(59, 130, 246, 0.1);
+  --wave-radius: 12px;
+  --wave-radius-sm: 8px;
+  --wave-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --toolbar-height: 48px;
+  --status-height: 28px;
+  --transition: 0.2s ease;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--wave-bg);
+  color: var(--wave-text);
+  font-family: var(--wave-font);
+  font-size: 14px;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ===== Toolbar ===== */
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  height: var(--toolbar-height);
+  background: var(--wave-surface);
+  border-bottom: 1px solid var(--wave-border);
+  padding: 0 12px;
+  gap: 8px;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.toolbar-left, .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.nav-btn, .toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--wave-muted);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--wave-radius-sm);
+  cursor: pointer;
+  transition: all var(--transition);
+  gap: 6px;
+  padding: 0 8px;
+  width: auto;
+  min-width: 32px;
+}
+
+.nav-btn { width: 32px; padding: 0; }
+
+.nav-btn:hover, .toolbar-btn:hover {
+  background: var(--wave-surface-hover);
+  color: var(--wave-text);
+}
+
+.nav-btn:active, .toolbar-btn:active {
+  transform: scale(0.95);
+}
+
+.ai-btn {
+  background: var(--wave-accent-soft) !important;
+  color: var(--wave-accent) !important;
+  padding: 0 12px !important;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.ai-btn:hover {
+  background: rgba(59, 130, 246, 0.2) !important;
+}
+
+.ai-btn span {
+  white-space: nowrap;
+}
+
+/* ===== Address Bar ===== */
+
+.address-bar-container {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+
+#address-bar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: 640px;
+  background: var(--wave-bg);
+  border: 1px solid var(--wave-border);
+  border-radius: 20px;
+  padding: 0 4px 0 12px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+#address-bar:focus-within {
+  border-color: var(--wave-accent);
+  box-shadow: 0 0 0 3px var(--wave-accent-soft);
+}
+
+.lock-icon {
+  color: var(--wave-muted);
+  flex-shrink: 0;
+  margin-right: 8px;
+}
+
+#url-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--wave-text);
+  font-size: 14px;
+  padding: 8px 4px;
+  font-family: var(--wave-font);
+}
+
+#url-input::placeholder {
+  color: var(--wave-muted);
+}
+
+.go-btn {
+  background: var(--wave-accent);
+  color: white;
+  border: none;
+  border-radius: 16px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition);
+  white-space: nowrap;
+}
+
+.go-btn:hover {
+  background: var(--wave-accent-hover);
+}
+
+/* ===== Main Content ===== */
+
+#main-content {
+  flex: 1;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+
+#neko-container {
+  flex: 1;
+  position: relative;
+  background: #000;
+}
+
+#neko-viewer {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+/* ===== AI Panel ===== */
+
+#ai-panel {
+  width: 360px;
+  background: var(--wave-surface);
+  border-left: 1px solid var(--wave-border);
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.3s ease, width 0.3s ease;
+}
+
+#ai-panel.hidden {
+  transform: translateX(100%);
+  width: 0;
+  border-left: none;
+}
+
+.ai-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--wave-border);
+}
+
+.ai-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--wave-accent);
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--wave-muted);
+  font-size: 20px;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--wave-radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition);
+}
+
+.close-btn:hover {
+  background: var(--wave-surface-hover);
+  color: var(--wave-text);
+}
+
+#ai-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-message {
+  padding: 12px 16px;
+  border-radius: var(--wave-radius-sm);
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 90%;
+}
+
+.ai-message.user {
+  background: var(--wave-accent);
+  color: white;
+  align-self: flex-end;
+}
+
+.ai-message.assistant {
+  background: var(--wave-bg);
+  border: 1px solid var(--wave-border);
+  color: var(--wave-text);
+  align-self: flex-start;
+}
+
+.ai-message.assistant pre {
+  background: var(--wave-bg);
+  border: 1px solid var(--wave-border);
+  border-radius: var(--wave-radius-sm);
+  padding: 8px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.ai-input-container {
+  padding: 12px;
+  border-top: 1px solid var(--wave-border);
+  display: flex;
+  gap: 8px;
+}
+
+#ai-input {
+  flex: 1;
+  background: var(--wave-bg);
+  border: 1px solid var(--wave-border);
+  border-radius: var(--wave-radius-sm);
+  color: var(--wave-text);
+  padding: 10px 12px;
+  font-family: var(--wave-font);
+  font-size: 14px;
+  resize: none;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+#ai-input:focus {
+  border-color: var(--wave-accent);
+}
+
+.send-btn {
+  background: var(--wave-accent);
+  color: white;
+  border: none;
+  border-radius: var(--wave-radius-sm);
+  padding: 8px 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition);
+  white-space: nowrap;
+}
+
+.send-btn:hover {
+  background: var(--wave-accent-hover);
+}
+
+/* ===== Sidebars (Bookmarks, History) ===== */
+
+#bookmarks-panel, #history-panel {
+  width: 280px;
+  background: var(--wave-surface);
+  border-right: 1px solid var(--wave-border);
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.3s ease, width 0.3s ease;
+}
+
+#bookmarks-panel.hidden, #history-panel.hidden {
+  transform: translateX(-100%);
+  width: 0;
+  border-right: none;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--wave-border);
+}
+
+.sidebar-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--wave-text);
+}
+
+#bookmarks-list, #history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.bookmark-item, .history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--wave-radius-sm);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.bookmark-item:hover, .history-item:hover {
+  background: var(--wave-surface-hover);
+}
+
+.bookmark-item .favicon, .history-item .favicon {
+  width: 16px;
+  height: 16px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.bookmark-item .title, .history-item .title {
+  font-size: 13px;
+  color: var(--wave-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bookmark-item .url, .history-item .url {
+  font-size: 11px;
+  color: var(--wave-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== Status Bar ===== */
+
+#status-bar {
+  display: flex;
+  align-items: center;
+  height: var(--status-height);
+  background: var(--wave-surface);
+  border-top: 1px solid var(--wave-border);
+  padding: 0 12px;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--wave-muted);
+  flex-shrink: 0;
+}
+
+#status-text {
+  font-weight: 500;
+}
+
+#status-url {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.5);
+}
+
+.status-dot.disconnected {
+  background: #ef4444;
+}
+
+#fps-counter {
+  color: var(--wave-muted);
+  font-size: 10px;
+}
+
+/* ===== Utility ===== */
+
+.hidden {
+  display: none !important;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--wave-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--wave-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wave-muted);
+}
+
+/* ===== Responsive ===== */
+
+@media (max-width: 768px) {
+  .toolbar-right .toolbar-btn span {
+    display: none;
+  }
+  
+  #ai-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 10;
+    width: 100%;
+    max-width: 360px;
+  }
+  
+  #bookmarks-panel, #history-panel {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 10;
+    width: 100%;
+    max-width: 280px;
+  }
+}

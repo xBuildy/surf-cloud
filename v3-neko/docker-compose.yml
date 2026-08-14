@@ -1,0 +1,28 @@
+version: "3.8"
+services:
+  wave-surf-neko:
+    build: .
+    container_name: wave-surf-neko
+    ports:
+      - "8080:8080"
+      - "9222:9222"
+    environment:
+      - NEKO_SCREEN=1920x1080@30
+      - NEKO_VIDEO_BITRATE=4000
+      - NEKO_MAX_FPS=60
+      - NEKO_AUDIO_BITRATE=128
+      - NEKO_PASSWORD=wave-surf
+      - NEKO_ADMIN_PASSWORD=wave-admin
+      - NEKO_CONTROL_PROTECTION=false
+      - NEKO_IMPLICIT_CONTROL=true
+    restart: unless-stopped
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
