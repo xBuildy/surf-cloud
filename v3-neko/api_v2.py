@@ -81,7 +81,7 @@ class ResizeRequest(BaseModel):
 # called Page.enable AND sometimes grabbed an extension's page target — so the
 # command response never arrived and every call ate the full 15s timeout.
 
-CDP_TIMEOUT = 20.0
+CDP_TIMEOUT = 6.0
 
 # websockets connect kwargs: send an Origin header Chrome will accept under
 # --remote-allow-origins. Missing Origin => Chrome refuses to service CDP
@@ -97,8 +97,6 @@ def _ws_connect(url):
     else:
         kwargs["extra_headers"] = hdrs
     return websockets.connect(url, **kwargs)
-
-
 
 
 def _is_real_page(t: dict) -> bool:
@@ -246,165 +244,6 @@ async def cdp_evaluate(expression: str):
 
 # ===== Endpoints =====
 
-@app.get("/api/debug/env")
-async def debug_env():
-    """Inspect the container: managed policies, running chrome flags, who
-    listens on 9222. This tells us if a policy is blocking CDP or if neko is
-    proxying the port."""
-    import subprocess, glob, os
-    out = {}
-    # Managed policies (can restrict remote debugging / devtools).
-    pol = {}
-    for p in glob.glob("/etc/chromium/policies/**/*.json", recursive=True) + \
-            glob.glob("/etc/opt/chrome/policies/**/*.json", recursive=True):
-        try:
-            pol[p] = open(p).read()[:2000]
-        except Exception as e:
-            pol[p] = f"read error: {e}"
-    out["managed_policies"] = pol or "none found"
-    # Running chromium process + its flags.
-    try:
-        ps = subprocess.run(["ps", "-eo", "pid,comm,args"], capture_output=True, text=True, timeout=5).stdout
-        out["chrome_procs"] = [l for l in ps.splitlines() if "chrom" in l.lower()][:6]
-    except Exception as e:
-        out["chrome_procs"] = f"err: {e}"
-    # Who listens on 9222.
-    try:
-        ss = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=5).stdout
-        out["port_9222"] = [l for l in ss.splitlines() if ":9222" in l] or "not found via ss"
-    except Exception as e:
-        try:
-            netstat = subprocess.run(["cat", "/proc/net/tcp"], capture_output=True, text=True, timeout=5).stdout
-            out["port_9222"] = "9222=0x2406; check /proc/net/tcp manually"
-        except Exception as e2:
-            out["port_9222"] = f"err: {e} / {e2}"
-    return out
-
-
-@app.get("/api/debug/browsersession")
-async def debug_browsersession():
-    """Test the ONE remaining path now that Origin is set: browser socket +
-    Target.attachToTarget(flatten) -> Page.enable/Runtime.enable via sessionId.
-    Page-level sockets are dead on this build; browser socket is the only one
-    that responds. If attachToTarget now succeeds WITH the Origin header, this
-    is the fix."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        ver = (await client.get(f"{CDP_URL}/json/version")).json()
-        browser_ws = ver.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1")
-    steps = []
-
-    async def recv_id(ws, mid, timeout=6.0):
-        start = asyncio.get_event_loop().time()
-        while True:
-            rem = timeout - (asyncio.get_event_loop().time() - start)
-            if rem <= 0:
-                raise asyncio.TimeoutError("timeout")
-            m = json.loads(await asyncio.wait_for(ws.recv(), timeout=rem))
-            if m.get("id") == mid:
-                return m
-
-    try:
-        async with _ws_connect(browser_ws) as ws:
-            steps.append({"connect_browser_ws": True})
-
-            await ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
-            r = await recv_id(ws, 1)
-            infos = r.get("result", {}).get("targetInfos", [])
-            page = next((t for t in infos if t.get("type") == "page"
-                         and not (t.get("url") or "").startswith(("chrome-extension://", "chrome://", "devtools://"))), None)
-            if not page:
-                cr = await ws.send(json.dumps({"id": 2, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
-                r2 = await recv_id(ws, 2)
-                target_id = r2.get("result", {}).get("targetId")
-            else:
-                target_id = page.get("targetId")
-            steps.append({"getTargets": True, "target_id": (target_id or "")[:12]})
-
-            await ws.send(json.dumps({"id": 3, "method": "Target.attachToTarget",
-                                      "params": {"targetId": target_id, "flatten": True}}))
-            r3 = await recv_id(ws, 3)
-            if "error" in r3:
-                steps.append({"attachToTarget": False, "error": r3["error"]})
-                return {"browser_ws": browser_ws, "steps": steps}
-            sid = r3.get("result", {}).get("sessionId")
-            steps.append({"attachToTarget": True, "sessionId": (sid or "")[:12]})
-
-            await ws.send(json.dumps({"id": 4, "method": "Page.enable", "sessionId": sid}))
-            r4 = await recv_id(ws, 4)
-            steps.append({"Page.enable": ("error" not in r4)})
-
-            await ws.send(json.dumps({"id": 5, "method": "Page.navigate",
-                                      "params": {"url": "https://example.com"}, "sessionId": sid}))
-            r5 = await recv_id(ws, 5, timeout=8.0)
-            steps.append({"Page.navigate": r5.get("result", r5.get("error"))})
-    except Exception as e:
-        steps.append({"exception": str(e) or type(e).__name__})
-    return {"browser_ws": browser_ws, "steps": steps}
-
-
-@app.get("/api/debug/probe")
-async def debug_probe():
-    """Decisive probe. For each candidate socket, send Runtime.enable THEN
-    Page.enable with a 5s per-command timeout, logging every raw frame and
-    which command (if any) hangs. Distinguishes: dead renderer (Runtime hangs
-    too) vs Page-domain-only breakage vs client id-matching bug."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        targets = (await client.get(f"{CDP_URL}/json")).json()
-    real = next((t for t in targets if _is_real_page(t)), None)
-
-    async def probe_socket(ws_url, label):
-        log = {"label": label, "ws": ws_url}
-        try:
-            async with _ws_connect(ws_url) as ws:
-                log["connected"] = True
-                for mid, method in [(1, "Runtime.enable"), (2, "Page.enable")]:
-                    await ws.send(json.dumps({"id": mid, "method": method}))
-                    frames = []
-                    got = False
-                    start = asyncio.get_event_loop().time()
-                    try:
-                        while True:
-                            rem = 5.0 - (asyncio.get_event_loop().time() - start)
-                            if rem <= 0:
-                                break
-                            raw = await asyncio.wait_for(ws.recv(), timeout=rem)
-                            frames.append(raw[:200])
-                            m = json.loads(raw)
-                            if m.get("id") == mid:
-                                got = True
-                                break
-                    except asyncio.TimeoutError:
-                        pass
-                    log[method] = {"responded": got, "frames_seen": len(frames), "sample": frames[:3]}
-                    if not got:
-                        break
-        except Exception as e:
-            log["error"] = str(e) or type(e).__name__
-        return log
-
-    results = {}
-    # Candidate 1: the existing real page target's own socket.
-    if real:
-        results["existing_page"] = await probe_socket(
-            real.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1"),
-            "existing_page")
-    # Candidate 2: a freshly created target via /json/new (spins a fresh renderer).
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            try:
-                newt = (await client.put(f"{CDP_URL}/json/new?about:blank")).json()
-            except Exception:
-                newt = (await client.get(f"{CDP_URL}/json/new?about:blank")).json()
-        results["fresh_target"] = await probe_socket(
-            newt.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1"),
-            "fresh_target")
-    except Exception as e:
-        results["fresh_target"] = {"error": str(e) or type(e).__name__}
-
-    return {"targets_seen": [{"type": t.get("type"), "url": (t.get("url") or "")[:60]} for t in targets], "probes": results}
-
-
-
 @app.get("/health")
 @app.get("/api/health")
 async def health():
@@ -440,44 +279,6 @@ async def debug_targets():
         except Exception as e:
             out["targets_error"] = str(e)
     return out
-
-@app.get("/api/debug/navigate")
-async def debug_navigate(url: str = "https://example.com"):
-    """Step-by-step CDP diagnostic: reports exactly which step hangs/fails.
-    Each step has its own short timeout so we never wait the full window."""
-    steps = []
-    try:
-        ws_url = await _pick_page_ws()
-        steps.append({"step": "pick_page_ws", "ok": True, "ws": ws_url})
-    except Exception as e:
-        steps.append({"step": "pick_page_ws", "ok": False, "err": str(e)})
-        return {"steps": steps}
-
-    try:
-        ws = await asyncio.wait_for(_ws_connect(ws_url), timeout=8)
-        steps.append({"step": "connect", "ok": True})
-    except Exception as e:
-        steps.append({"step": "connect", "ok": False, "err": str(e) or type(e).__name__})
-        return {"steps": steps}
-
-    session = CDPSession(ws)
-    for method, params in [
-        ("Page.enable", {}),
-        ("Runtime.enable", {}),
-        ("Page.navigate", {"url": url}),
-    ]:
-        try:
-            res = await session.send(method, params, use_session=False, timeout=6.0)
-            steps.append({"step": method, "ok": True, "result": res})
-        except Exception as e:
-            steps.append({"step": method, "ok": False, "err": str(e) or type(e).__name__})
-            break
-    try:
-        await ws.close()
-    except Exception:
-        pass
-    return {"steps": steps}
-
 
 @app.post("/navigate")
 @app.post("/api/navigate")
