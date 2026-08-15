@@ -6,7 +6,7 @@
 
 const API_BASE = window.location.origin + '/api';
 const WAVE_SEARCH_URL = 'https://wave-search-production.up.railway.app';
-const NEKO_VIEWER_URL = window.location.origin + '/neko/';
+const NEKO_VIEWER_URL = window.location.origin + '/neko/?usr=wave&pwd=neko&u=wave&p=neko&cast=1&embed=1&show_side=0&volume=0';
 
 // DOM elements
 const urlInput = document.getElementById('url-input');
