@@ -4,10 +4,26 @@ FROM searxng/searxng:latest
 COPY searxng-settings.yml /etc/searxng/settings.yml
 
 # Create Wave OS dark theme
-RUN mkdir -p /usr/local/searxng-src/searx/static/themes/wave/css
 
 # Wave OS dark theme CSS - reskin SearXNG with Wave OS aesthetic
-RUN cat > /usr/local/searxng-src/searx/static/themes/wave/css/wave-dark.css << 'CSSEOF'
+
+# ============================================================
+# Wave OS skin + rebrand applied to the STOCK "simple" theme.
+# We do NOT register a custom theme name (that failed validation:
+# ValidationException Invalid value: "wave"). Instead we keep
+# ui.default_theme: simple and (a) drop our dark CSS into simple's
+# static dir, (b) link it from simple/base.html, (c) swap the
+# hardcoded "SearXNG" wordmark text to "Wave Search".
+# RTOOT is the real runtime path (/usr/local/searxng), with a
+# fallback to /usr/local/searxng-src for older base layouts.
+# ============================================================
+
+# Write the Wave dark CSS into whichever searx static dir exists.
+RUN set -e; \
+    for ROOT in /usr/local/searxng /usr/local/searxng-src; do \
+      if [ -d "$ROOT/searx/static/themes/simple/css" ]; then \
+        mkdir -p "$ROOT/searx/static/themes/simple/css"; \
+        cat > "$ROOT/searx/static/themes/simple/css/wave-dark.css" << 'CSSEOF'
 :root {
   --wave-bg: #0a0a0b;
   --wave-surface: #131316;
@@ -223,50 +239,28 @@ a:hover {
   .result { padding: 14px !important; }
 }
 CSSEOF
+      fi; \
+    done
 
-# Create the wave theme template directory
-RUN mkdir -p /usr/local/searxng-src/searx/templates/wave
-
-# Copy the simple theme as the wave theme base (we'll override CSS)
-RUN cp -r /usr/local/searxng-src/searx/templates/simple/* /usr/local/searxng-src/searx/templates/wave/ 2>/dev/null || true
-
-# Add Wave Search branding header injection
-RUN cat > /usr/local/searxng-src/searx/templates/wave/base.html << 'HTMLEOF'
-{% extends "simple/base.html" %}
-{% block title %}Wave Search{% endblock %}
-{% block head %}
-{{ super() }}
-<link rel="stylesheet" href="{{ url_for('static', filename='themes/wave/css/wave-dark.css') }}" type="text/css" />
-<style>
-  /* Kill any residual SearXNG wordmark/branding in header + footer */
-  .title h1, .searxng, .instance-name, a[href*="searxng"], .footer a[href*="searxng"] { font-size:0 !important; }
-  .title h1::after, .instance-name::after { content:"Wave Search"; font-size:1.6rem; font-weight:700; }
-</style>
-{% endblock %}
-{% block header %}
-<div class="center wave-header">
-  <div class="wave-brand">Wave<span>Search</span></div>
-</div>
-{% endblock %}
-{% block footer %}
-<footer class="wave-footer"><p>Wave Search &middot; part of Wave OS</p></footer>
-{% endblock %}
-HTMLEOF
-
-# ---- Global rebrand: replace every hardcoded "SearXNG" wordmark in the stock
-# simple theme templates + macros with "Wave Search" (title h1, footer "Powered by",
-# meta description/keywords). This catches strings the block-overrides can't reach.
+# Link the CSS from simple/base.html <head>, set page <title>, and
+# rebrand the hardcoded SearXNG wordmark + footer to Wave Search.
 RUN set -e; \
-    SRC=/usr/local/searxng-src/searx; \
-    grep -rIl "SearXNG" "$SRC/templates/simple" "$SRC/templates/wave" 2>/dev/null | while read f; do \
-      sed -i \
-        -e 's/>SearXNG</>Wave Search</g' \
-        -e 's/Powered by <a href="\/info\/en\/about">SearXNG<\/a>[^<]*/Powered by Wave Search /g' \
-        -e 's/content="SearXNG[^"]*"/content="Wave Search — a privacy-respecting metasearch engine"/g' \
-        "$f" || true; \
+    for ROOT in /usr/local/searxng /usr/local/searxng-src; do \
+      BH="$ROOT/searx/templates/simple/base.html"; \
+      [ -f "$BH" ] || continue; \
+      # inject stylesheet link + title override just before </head>
+      sed -i 's#</head>#<link rel="stylesheet" href="{{ url_for('"'"'static'"'"', filename='"'"'themes/simple/css/wave-dark.css'"'"') }}" type="text/css" /></head>#' "$BH" || true; \
+      # swap wordmark text (title h1) and footer "Powered by" line
+      sed -i 's/>SearXNG</>Wave Search</g' "$BH" || true; \
+      sed -i 's#Powered by <a href="/info/en/about">SearXNG</a>#Powered by <a href="/info/en/about">Wave Search</a>#g' "$BH" || true; \
     done; \
-    # hide the "Source code / Issue tracker" github links and version string in footer \
-    sed -i 's#<a href="https://github.com/searxng/searxng">Source code</a>##g; s#<a href="https://github.com/searxng/searxng/issues">Issue tracker</a>##g' "$SRC/templates/simple/base.html" || true
+    # also swap wordmark anywhere else in simple templates (macros, etc.)
+    for ROOT in /usr/local/searxng /usr/local/searxng-src; do \
+      [ -d "$ROOT/searx/templates/simple" ] || continue; \
+      grep -rIl ">SearXNG<" "$ROOT/searx/templates/simple" 2>/dev/null | while read f; do \
+        sed -i 's/>SearXNG</>Wave Search</g' "$f" || true; \
+      done; \
+    done
 
 EXPOSE 8080
 
