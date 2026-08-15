@@ -258,6 +258,47 @@ async def debug_targets():
             out["targets_error"] = str(e)
     return out
 
+@app.get("/api/debug/navigate")
+async def debug_navigate(url: str = "https://example.com"):
+    """Step-by-step CDP diagnostic: reports exactly which step hangs/fails.
+    Each step has its own short timeout so we never wait the full window."""
+    steps = []
+    try:
+        ws_url = await _pick_page_ws()
+        steps.append({"step": "pick_page_ws", "ok": True, "ws": ws_url})
+    except Exception as e:
+        steps.append({"step": "pick_page_ws", "ok": False, "err": str(e)})
+        return {"steps": steps}
+
+    try:
+        ws = await asyncio.wait_for(
+            websockets.connect(ws_url, open_timeout=8, close_timeout=5, max_size=None),
+            timeout=8,
+        )
+        steps.append({"step": "connect", "ok": True})
+    except Exception as e:
+        steps.append({"step": "connect", "ok": False, "err": str(e) or type(e).__name__})
+        return {"steps": steps}
+
+    session = CDPSession(ws)
+    for method, params in [
+        ("Page.enable", {}),
+        ("Runtime.enable", {}),
+        ("Page.navigate", {"url": url}),
+    ]:
+        try:
+            res = await session.send(method, params, use_session=False, timeout=6.0)
+            steps.append({"step": method, "ok": True, "result": res})
+        except Exception as e:
+            steps.append({"step": method, "ok": False, "err": str(e) or type(e).__name__})
+            break
+    try:
+        await ws.close()
+    except Exception:
+        pass
+    return {"steps": steps}
+
+
 @app.post("/navigate")
 @app.post("/api/navigate")
 async def navigate(req: NavigateRequest):
