@@ -263,6 +263,35 @@ async def health():
         return {"status": "error", "message": err_msg, "cdp": "disconnected"}
 
 @app.get("/debug/targets")
+@app.get("/api/debug/neko")
+async def debug_neko():
+    import subprocess, glob, os
+    out={}
+    # neko binary version
+    for b in ["/usr/bin/neko","/app/neko","neko"]:
+        try:
+            out["version"]=subprocess.run([b,"--version"],capture_output=True,text=True,timeout=5).stdout.strip() or subprocess.run([b,"serve","--help"],capture_output=True,text=True,timeout=5).stdout[:200]
+            out["bin"]=b; break
+        except Exception as e:
+            out.setdefault("verr",[]).append(f"{b}: {e}")
+    # resolved config file
+    for p in ["/etc/neko/neko.yaml","/etc/neko/neko.yml"]:
+        if os.path.exists(p):
+            out["config_file"]=p; out["config"]=open(p).read()[:1500]
+    # NEKO_* env actually in the neko process
+    try:
+        ps=subprocess.run(["ps","-eo","pid,args"],capture_output=True,text=True,timeout=5).stdout
+        out["neko_proc"]=[l for l in ps.splitlines() if "neko" in l.lower() and "serve" in l.lower() or ("/neko" in l and "--" in l)][:4]
+    except Exception as e:
+        out["neko_proc"]=f"err {e}"
+    out["neko_env"]={k:v for k,v in os.environ.items() if k.startswith("NEKO_")}
+    # supervisor conf for neko
+    for p in glob.glob("/etc/neko/supervisord/*.conf"):
+        if "neko" in p.lower():
+            out[os.path.basename(p)]=open(p).read()[:800]
+    return out
+
+
 @app.get("/api/debug/targets")
 async def debug_targets():
     """Temporary diagnostic endpoint: raw CDP target list + version info."""
