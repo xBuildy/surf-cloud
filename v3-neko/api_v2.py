@@ -246,6 +246,67 @@ async def cdp_evaluate(expression: str):
 
 # ===== Endpoints =====
 
+@app.get("/api/debug/browsersession")
+async def debug_browsersession():
+    """Test the ONE remaining path now that Origin is set: browser socket +
+    Target.attachToTarget(flatten) -> Page.enable/Runtime.enable via sessionId.
+    Page-level sockets are dead on this build; browser socket is the only one
+    that responds. If attachToTarget now succeeds WITH the Origin header, this
+    is the fix."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        ver = (await client.get(f"{CDP_URL}/json/version")).json()
+        browser_ws = ver.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1")
+    steps = []
+
+    async def recv_id(ws, mid, timeout=6.0):
+        start = asyncio.get_event_loop().time()
+        while True:
+            rem = timeout - (asyncio.get_event_loop().time() - start)
+            if rem <= 0:
+                raise asyncio.TimeoutError("timeout")
+            m = json.loads(await asyncio.wait_for(ws.recv(), timeout=rem))
+            if m.get("id") == mid:
+                return m
+
+    try:
+        async with _ws_connect(browser_ws) as ws:
+            steps.append({"connect_browser_ws": True})
+
+            await ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
+            r = await recv_id(ws, 1)
+            infos = r.get("result", {}).get("targetInfos", [])
+            page = next((t for t in infos if t.get("type") == "page"
+                         and not (t.get("url") or "").startswith(("chrome-extension://", "chrome://", "devtools://"))), None)
+            if not page:
+                cr = await ws.send(json.dumps({"id": 2, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
+                r2 = await recv_id(ws, 2)
+                target_id = r2.get("result", {}).get("targetId")
+            else:
+                target_id = page.get("targetId")
+            steps.append({"getTargets": True, "target_id": (target_id or "")[:12]})
+
+            await ws.send(json.dumps({"id": 3, "method": "Target.attachToTarget",
+                                      "params": {"targetId": target_id, "flatten": True}}))
+            r3 = await recv_id(ws, 3)
+            if "error" in r3:
+                steps.append({"attachToTarget": False, "error": r3["error"]})
+                return {"browser_ws": browser_ws, "steps": steps}
+            sid = r3.get("result", {}).get("sessionId")
+            steps.append({"attachToTarget": True, "sessionId": (sid or "")[:12]})
+
+            await ws.send(json.dumps({"id": 4, "method": "Page.enable", "sessionId": sid}))
+            r4 = await recv_id(ws, 4)
+            steps.append({"Page.enable": ("error" not in r4)})
+
+            await ws.send(json.dumps({"id": 5, "method": "Page.navigate",
+                                      "params": {"url": "https://example.com"}, "sessionId": sid}))
+            r5 = await recv_id(ws, 5, timeout=8.0)
+            steps.append({"Page.navigate": r5.get("result", r5.get("error"))})
+    except Exception as e:
+        steps.append({"exception": str(e) or type(e).__name__})
+    return {"browser_ws": browser_ws, "steps": steps}
+
+
 @app.get("/api/debug/probe")
 async def debug_probe():
     """Decisive probe. For each candidate socket, send Runtime.enable THEN
