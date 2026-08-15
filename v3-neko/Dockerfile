@@ -56,6 +56,15 @@ RUN apt-get update && apt-get install -y \
 COPY chromium.conf /etc/neko/supervisord/chromium.conf
 COPY neko.yaml /etc/neko/neko.yaml
 
+# Override the base image's managed Chrome policy. The base image ships
+# /etc/chromium/policies/managed/policies.json with "DeveloperToolsAvailability": 2
+# (DevTools DISABLED) — which makes Chrome return -32000 "Not allowed" on
+# Target.attachToTarget and silently refuse to service page-level CDP sockets,
+# breaking all automation. We overwrite it with DeveloperToolsAvailability=1
+# (allowed) + RemoteDebuggingAllowed=true, and drop the force-installed
+# extensions we don't want.
+COPY policies.json /etc/chromium/policies/managed/policies.json
+
 # New supervisor programs (additive — merge into the base image's own
 # /etc/neko/supervisord.conf [include] directory).
 COPY cdp-api.conf /etc/neko/supervisord/cdp-api.conf
