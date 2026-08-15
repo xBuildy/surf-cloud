@@ -83,6 +83,23 @@ class ResizeRequest(BaseModel):
 
 CDP_TIMEOUT = 20.0
 
+# websockets connect kwargs: send an Origin header Chrome will accept under
+# --remote-allow-origins. Missing Origin => Chrome refuses to service CDP
+# commands (page socket hangs; browser socket returns -32000 "Not allowed").
+import websockets as _ws_pkg
+_WS_VER = tuple(int(x) for x in getattr(_ws_pkg, "__version__", "0").split(".")[:2] if x.isdigit())
+
+def _ws_connect(url):
+    kwargs = dict(open_timeout=10, close_timeout=5, max_size=None)
+    hdrs = [("Origin", "http://127.0.0.1:9222")]
+    if _WS_VER >= (12,):
+        kwargs["additional_headers"] = hdrs
+    else:
+        kwargs["extra_headers"] = hdrs
+    return websockets.connect(url, **kwargs)
+
+
+
 
 def _is_real_page(t: dict) -> bool:
     """A real, attachable browsing tab — not an extension/devtools/internal target.
@@ -168,7 +185,7 @@ async def _with_session(fn):
     ws_url = await _pick_page_ws()
     if not ws_url:
         return {"error": "No page webSocketDebuggerUrl available"}
-    async with websockets.connect(ws_url, open_timeout=10, close_timeout=5, max_size=None) as ws:
+    async with _ws_connect(ws_url) as ws:
         session = CDPSession(ws)
         await session.prepare()
         return await fn(session)
@@ -278,10 +295,7 @@ async def debug_navigate(url: str = "https://example.com"):
         return {"steps": steps}
 
     try:
-        ws = await asyncio.wait_for(
-            websockets.connect(ws_url, open_timeout=8, close_timeout=5, max_size=None),
-            timeout=8,
-        )
+        ws = await asyncio.wait_for(_ws_connect(ws_url), timeout=8)
         steps.append({"step": "connect", "ok": True})
     except Exception as e:
         steps.append({"step": "connect", "ok": False, "err": str(e) or type(e).__name__})
