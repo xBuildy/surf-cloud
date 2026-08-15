@@ -242,3 +242,10 @@ a:hover {
   background: none !important;
   display: none !important;
 }
+
+/* Belt-and-suspenders: if the theme puts an <img>/<svg> logo inside
+   .title (instead of styling the h1), hide it and keep only our text. */
+.title img, .title svg, .index .title img, .index .title svg {
+  display: none !important;
+}
+.title, .index .title { text-align: center !important; }
