@@ -212,3 +212,33 @@ a:hover {
   #main_results { padding: 12px !important; }
   .result { padding: 14px !important; }
 }
+
+/* ============================================================
+   Force the homepage logo to read "Wave Search" instead of the
+   SearXNG image-logo. SearXNG's simple theme hides the <h1> text
+   and paints "SearXNG" via background/font tricks on .title h1.
+   We reset all of that and show plain styled text.
+   ============================================================ */
+.title h1 {
+  /* undo any image/logo/hide tricks */
+  background: none !important;
+  background-image: none !important;
+  text-indent: 0 !important;
+  overflow: visible !important;
+  width: auto !important;
+  height: auto !important;
+  font-size: 2.6rem !important;
+  line-height: 1.1 !important;
+  font-style: italic !important;
+  font-weight: 800 !important;
+  color: #3B82F6 !important;      /* Wave blue */
+  text-shadow: 0 0 24px rgba(59,130,246,0.35);
+  letter-spacing: -1px;
+  white-space: nowrap;
+}
+/* nuke any ::before/::after that inject the SearXNG glyph/image */
+.title h1::before, .title h1::after {
+  content: "" !important;
+  background: none !important;
+  display: none !important;
+}
