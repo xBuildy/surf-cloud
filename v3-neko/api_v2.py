@@ -67,27 +67,21 @@ class ResizeRequest(BaseModel):
 
 # ===== CDP Helpers =====
 #
-# Correct CDP attach topology (this is the fix for the 15s /navigate hang):
-#   1. Connect to the BROWSER-level websocket (/json/version -> webSocketDebuggerUrl).
-#   2. Target.getTargets -> pick a REAL page target (http/https/about,
-#      excluding extensions, background_page, devtools, "other").
-#   3. Target.attachToTarget {flatten: true} -> get a sessionId.
-#   4. Send Page.enable FIRST over that sessionId (missing Page.enable is a
-#      classic cause of Page.* commands never resolving), then the real command.
+# Correct CDP flow (this is the fix for the 15s /navigate hang):
+#   1. GET /json -> pick a REAL page target (http/https/about, excluding
+#      chrome-extension / devtools / chrome-untrusted / background targets).
+#   2. Connect to THAT page target's own webSocketDebuggerUrl. A page-level
+#      socket is implicitly attached to the page, so no Target.attachToTarget
+#      is needed (this Chrome build rejects attachToTarget with -32000
+#      "Not allowed" over the browser socket anyway).
+#   3. Send Page.enable + Runtime.enable FIRST (missing Page.enable is a
+#      classic cause of Page.* commands never resolving), THEN the real command.
 #
-# Previously we opened the PAGE target's own devtools socket and fired
-# Page.navigate with no Page.enable — over the wrong topology, the response
-# event never came back and every call ate the full 15s timeout.
+# Two earlier bugs combined here: the old code opened a page socket but never
+# called Page.enable AND sometimes grabbed an extension's page target — so the
+# command response never arrived and every call ate the full 15s timeout.
 
 CDP_TIMEOUT = 20.0
-
-
-async def _get_browser_ws() -> str:
-    """Fetch the browser-level CDP websocket debugger URL."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        res = await client.get(f"{CDP_URL}/json/version")
-        ws = res.json().get("webSocketDebuggerUrl", "")
-    return ws.replace("localhost", "127.0.0.1")
 
 
 def _is_real_page(t: dict) -> bool:
@@ -140,40 +134,36 @@ class CDPSession:
                     raise RuntimeError(f"CDP {method} error: {resp['error']}")
                 return resp.get("result", {})
 
-    async def attach_to_page(self):
-        """Find a real page target and attach (flatten) to it."""
-        targets = (await self.send("Target.getTargets", use_session=False)).get("targetInfos", [])
+    async def prepare(self):
+        """Enable the domains we rely on BEFORE issuing Page/Runtime commands.
+        On a page-level socket there is no sessionId — commands go straight to
+        the attached page, so use_session stays False throughout."""
+        await self.send("Page.enable", use_session=False)
+        await self.send("Runtime.enable", use_session=False)
+
+
+async def _pick_page_ws() -> str:
+    """Return the webSocketDebuggerUrl of a real, attachable page target.
+    Creates an about:blank tab if none exists. Connecting to a page target's
+    OWN socket gives an implicitly-attached session — no Target.attachToTarget
+    (which this Chrome build rejects with -32000 "Not allowed")."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        targets = (await client.get(f"{CDP_URL}/json")).json()
         page = next((t for t in targets if _is_real_page(t)), None)
-
         if not page:
-            # No usable page target — create one on about:blank.
-            created = await self.send("Target.createTarget", {"url": "about:blank"}, use_session=False)
-            target_id = created.get("targetId")
-        else:
-            target_id = page.get("targetId")
-
-        attached = await self.send(
-            "Target.attachToTarget",
-            {"targetId": target_id, "flatten": True},
-            use_session=False,
-        )
-        self.session_id = attached.get("sessionId")
-        if not self.session_id:
-            raise RuntimeError("Target.attachToTarget returned no sessionId")
-        # Enable the domains we rely on BEFORE issuing Page/Runtime commands.
-        await self.send("Page.enable")
-        await self.send("Runtime.enable")
-        return self.session_id
+            page = (await client.get(f"{CDP_URL}/json/new?about:blank")).json()
+    ws = page.get("webSocketDebuggerUrl", "")
+    return ws.replace("localhost", "127.0.0.1")
 
 
 async def _with_session(fn):
-    """Open browser socket, attach to a page, run fn(session), always clean up."""
-    ws_url = await _get_browser_ws()
+    """Open the page-level socket, enable domains, run fn(session), clean up."""
+    ws_url = await _pick_page_ws()
     if not ws_url:
-        return {"error": "No browser webSocketDebuggerUrl available"}
+        return {"error": "No page webSocketDebuggerUrl available"}
     async with websockets.connect(ws_url, open_timeout=10, close_timeout=5, max_size=None) as ws:
         session = CDPSession(ws)
-        await session.attach_to_page()
+        await session.prepare()
         return await fn(session)
 
 
@@ -185,7 +175,7 @@ async def cdp_send(method: str, params: dict = None, session_id: str = None):
     """
     async def _run(session: CDPSession):
         try:
-            result = await session.send(method, params or {})
+            result = await session.send(method, params or {}, use_session=False)
             return {"result": result}
         except Exception as e:
             return {"error": str(e) or type(e).__name__}
@@ -201,7 +191,7 @@ async def cdp_navigate(url: str):
     subresource can't eat the timeout after the nav already succeeded."""
     async def _run(session: CDPSession):
         try:
-            result = await session.send("Page.navigate", {"url": url})
+            result = await session.send("Page.navigate", {"url": url}, use_session=False)
             if result.get("errorText"):
                 return {"error": result["errorText"]}
             return {"result": result}  # has frameId / loaderId = committed
@@ -220,7 +210,7 @@ async def cdp_evaluate(expression: str):
             result = await session.send("Runtime.evaluate", {
                 "expression": expression,
                 "returnByValue": True,
-            })
+            }, use_session=False)
             return result.get("result", {}).get("value")
         except Exception:
             return None
