@@ -5,6 +5,10 @@
 # directly without a login prompt — this is a single-user
 # automation-focused embed, not a multi-user shared session.
 # desktop/session settings are otherwise the same as the base image.
+#
+# Env equivalents:
+# NEKO_SESSION_IMPLICIT_CONTROL=true
+# NEKO_SESSION_IMPLICIT_HOSTING=true
 # ============================================================
 
 desktop:
@@ -16,5 +20,6 @@ member:
 session:
   merciful_reconnect: true
   implicit_hosting: true
+  implicit_control: true
   cookie:
     enabled: false

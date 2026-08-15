@@ -30,6 +30,9 @@
 html, body {
   width: 100%;
   height: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
   background: var(--wave-bg);
   color: var(--wave-text);
@@ -40,7 +43,13 @@ html, body {
 #app {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
   height: 100vh;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 /* ===== Toolbar ===== */
@@ -180,12 +189,22 @@ html, body {
   display: flex;
   position: relative;
   overflow: hidden;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
 }
 
 #neko-container {
   flex: 1;
   position: relative;
   background: #000;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  max-width: none;
 }
 
 #neko-viewer {
@@ -193,6 +212,8 @@ html, body {
   height: 100%;
   border: none;
   display: block;
+  margin: 0;
+  padding: 0;
 }
 
 /* ===== AI Panel ===== */
@@ -481,13 +502,55 @@ html, body {
   background: var(--wave-muted);
 }
 
-/* ===== Responsive ===== */
+/* ===== Responsive Mobile Mode ===== */
 
 @media (max-width: 768px) {
-  .toolbar-right .toolbar-btn span {
+  #toolbar {
+    padding: 0 6px;
+    gap: 4px;
+    height: 44px;
+  }
+
+  .toolbar-left, .toolbar-right {
+    gap: 2px;
+  }
+
+  .toolbar-btn span, .ai-btn span {
     display: none;
   }
-  
+
+  .ai-btn {
+    padding: 0 8px !important;
+  }
+
+  .nav-btn, .toolbar-btn {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+    padding: 0;
+  }
+
+  .address-bar-container {
+    flex: 1;
+    min-width: 0;
+  }
+
+  #address-bar {
+    padding: 0 4px 0 8px;
+    border-radius: 16px;
+  }
+
+  #url-input {
+    font-size: 13px;
+    padding: 4px 2px;
+    min-width: 0;
+  }
+
+  .go-btn {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
   #ai-panel {
     position: absolute;
     right: 0;
@@ -495,9 +558,9 @@ html, body {
     bottom: 0;
     z-index: 10;
     width: 100%;
-    max-width: 360px;
+    max-width: 100%;
   }
-  
+
   #bookmarks-panel, #history-panel {
     position: absolute;
     left: 0;
@@ -505,6 +568,14 @@ html, body {
     bottom: 0;
     z-index: 10;
     width: 100%;
-    max-width: 280px;
+    max-width: 100%;
+  }
+
+  #neko-container {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
   }
 }
