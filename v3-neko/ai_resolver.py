@@ -19,6 +19,8 @@ Resilience added:
 import os
 import re
 import json
+import time
+import asyncio
 import httpx
 from typing import Optional, List
 
@@ -54,33 +56,53 @@ async def _theta_chat(messages: list, max_tokens: int, client: httpx.AsyncClient
     """
     last_err = None
     for (endpoint, model, key) in _backends():
-        try:
-            payload = {
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": False,
-            }
-            # Only include model for raw OpenAI-compatible endpoints; the
-            # chatbot-agent endpoint uses its own configured model.
-            if model:
-                payload["model"] = model
-            res = await client.post(
-                endpoint,
-                json=payload,
-                headers={"Authorization": f"Bearer {key}"},
-                timeout=per_try_timeout,
-            )
-            # 502/503/504 => backend down, try next
-            if res.status_code >= 500:
-                last_err = f"http {res.status_code}"
-                continue
-            # Body must be JSON; empty => treat as failure
+        payload = {
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        # Only include model for raw OpenAI-compatible endpoints; the
+        # chatbot-agent endpoint uses its own configured model.
+        if model:
+            payload["model"] = model
+        headers = {"Authorization": f"Bearer {key}"}
+
+        # Per-endpoint retry: 429 (rate limit) and 5xx are transient -> back off
+        # and retry a couple times before falling through to the next backend.
+        backoffs = [1.5, 4.0]  # seconds; total ~5.5s worst case per endpoint
+        attempt = 0
+        while True:
+            try:
+                res = await client.post(endpoint, json=payload, headers=headers, timeout=per_try_timeout)
+            except Exception as e:
+                last_err = str(e)
+                break  # network error -> next backend
+
+            sc = res.status_code
+            # Transient: rate-limited or backend down
+            if sc == 429 or sc >= 500:
+                last_err = f"http {sc}"
+                # honor Retry-After if the server sent one
+                ra = res.headers.get("Retry-After")
+                if attempt < len(backoffs):
+                    delay = backoffs[attempt]
+                    if ra:
+                        try:
+                            delay = max(delay, float(ra))
+                        except Exception:
+                            pass
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                break  # exhausted retries -> next backend
+
+            # Non-transient response: parse it
             try:
                 data = res.json()
             except Exception as e:
                 last_err = f"non-json body ({e})"
-                continue
+                break
             # Theta chatbot-agent wraps the OpenAI payload as
             # {"status":"success","body":{...}}. Unwrap if present.
             if isinstance(data, dict) and "body" in data and isinstance(data["body"], dict):
@@ -88,15 +110,12 @@ async def _theta_chat(messages: list, max_tokens: int, client: httpx.AsyncClient
             choices = (data or {}).get("choices") or []
             if not choices:
                 last_err = "empty choices"
-                continue
+                break
             content = (choices[0].get("message") or {}).get("content")
             if not content or not content.strip():
                 last_err = "empty content"
-                continue
+                break
             return content.strip()
-        except Exception as e:
-            last_err = str(e)
-            continue
     # all backends failed
     return None
 
@@ -225,8 +244,20 @@ async def plan_task(task: str, client: httpx.AsyncClient = None):
             await client.aclose()
 
 
-async def ai_health(client: httpx.AsyncClient = None) -> dict:
-    """Report whether any AI backend is reachable (used by /health)."""
+# Cache health so /health does not spend a chatbot call (and rate-limit
+# budget) on every hit. TTL keeps it fresh enough for monitoring.
+_HEALTH_CACHE = {"ts": 0.0, "ai_available": None}
+_HEALTH_TTL = 90.0  # seconds
+
+async def ai_health(client: httpx.AsyncClient = None, force: bool = False) -> dict:
+    """Report whether any AI backend is reachable (used by /health).
+    Result is cached for _HEALTH_TTL seconds so frequent /health polling
+    does not burn the chatbot endpoint's per-org rate limit."""
+    now = time.time()
+    if not force and _HEALTH_CACHE["ai_available"] is not None \
+            and (now - _HEALTH_CACHE["ts"]) < _HEALTH_TTL:
+        return {"ai_available": _HEALTH_CACHE["ai_available"], "cached": True}
+
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient()
@@ -237,7 +268,10 @@ async def ai_health(client: httpx.AsyncClient = None) -> dict:
             client=client,
             per_try_timeout=8.0,
         )
-        return {"ai_available": ok is not None}
+        avail = ok is not None
+        _HEALTH_CACHE["ts"] = now
+        _HEALTH_CACHE["ai_available"] = avail
+        return {"ai_available": avail, "cached": False}
     finally:
         if own_client:
             await client.aclose()
