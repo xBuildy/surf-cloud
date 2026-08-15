@@ -213,39 +213,37 @@ a:hover {
   .result { padding: 14px !important; }
 }
 
+
 /* ============================================================
-   Force the homepage logo to read "Wave Search" instead of the
-   SearXNG image-logo. SearXNG's simple theme hides the <h1> text
-   and paints "SearXNG" via background/font tricks on .title h1.
-   We reset all of that and show plain styled text.
+   REAL fix: the simple theme paints img/searxng.png as the
+   BACKGROUND of ".title" (not .title h1). The <h1> text sits on
+   top at font-size:1em (visually swamped by the image). Kill the
+   background image on .title and render the h1 as big Wave text.
+   wave-dark.css loads AFTER sxng-ltr.min.css so these win.
    ============================================================ */
-.title h1 {
-  /* undo any image/logo/hide tricks */
+.index .title,
+.title {
   background: none !important;
   background-image: none !important;
+  min-height: 0 !important;
+  margin: 3rem auto 1.5rem !important;
+  text-align: center !important;
+}
+.index .title h1,
+.title h1 {
+  font-size: 2.8rem !important;
+  line-height: 1.1 !important;
+  font-style: italic !important;
+  font-weight: 800 !important;
+  color: #3B82F6 !important;
+  text-shadow: 0 0 24px rgba(59,130,246,.35);
+  letter-spacing: -1px;
+  white-space: nowrap;
+  display: block !important;
+  visibility: visible !important;
   text-indent: 0 !important;
   overflow: visible !important;
   width: auto !important;
   height: auto !important;
-  font-size: 2.6rem !important;
-  line-height: 1.1 !important;
-  font-style: italic !important;
-  font-weight: 800 !important;
-  color: #3B82F6 !important;      /* Wave blue */
-  text-shadow: 0 0 24px rgba(59,130,246,0.35);
-  letter-spacing: -1px;
-  white-space: nowrap;
 }
-/* nuke any ::before/::after that inject the SearXNG glyph/image */
-.title h1::before, .title h1::after {
-  content: "" !important;
-  background: none !important;
-  display: none !important;
-}
-
-/* Belt-and-suspenders: if the theme puts an <img>/<svg> logo inside
-   .title (instead of styling the h1), hide it and keep only our text. */
-.title img, .title svg, .index .title img, .index .title svg {
-  display: none !important;
-}
-.title, .index .title { text-align: center !important; }
+.title h1::before, .title h1::after { content: "" !important; background: none !important; display: none !important; }
