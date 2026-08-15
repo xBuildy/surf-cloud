@@ -66,77 +66,169 @@ class ResizeRequest(BaseModel):
     user_id: Optional[str] = "demo"
 
 # ===== CDP Helpers =====
+#
+# Correct CDP attach topology (this is the fix for the 15s /navigate hang):
+#   1. Connect to the BROWSER-level websocket (/json/version -> webSocketDebuggerUrl).
+#   2. Target.getTargets -> pick a REAL page target (http/https/about,
+#      excluding extensions, background_page, devtools, "other").
+#   3. Target.attachToTarget {flatten: true} -> get a sessionId.
+#   4. Send Page.enable FIRST over that sessionId (missing Page.enable is a
+#      classic cause of Page.* commands never resolving), then the real command.
+#
+# Previously we opened the PAGE target's own devtools socket and fired
+# Page.navigate with no Page.enable — over the wrong topology, the response
+# event never came back and every call ate the full 15s timeout.
+
+CDP_TIMEOUT = 20.0
+
+
+async def _get_browser_ws() -> str:
+    """Fetch the browser-level CDP websocket debugger URL."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        res = await client.get(f"{CDP_URL}/json/version")
+        ws = res.json().get("webSocketDebuggerUrl", "")
+    return ws.replace("localhost", "127.0.0.1")
+
+
+def _is_real_page(t: dict) -> bool:
+    """A real, attachable browsing tab — not an extension/devtools/internal target."""
+    if not isinstance(t, dict):
+        return False
+    if t.get("type") != "page":
+        return False
+    url = t.get("url", "") or ""
+    for bad in ("chrome-extension://", "devtools://", "chrome-untrusted://"):
+        if url.startswith(bad):
+            return False
+    return True
+
+
+class CDPSession:
+    """A single browser-socket connection with request/response correlation.
+
+    Attaches (flatten) to a real page target, tracks its sessionId, and routes
+    every command over that session. Resolves each command on its matching id.
+    """
+
+    def __init__(self, ws):
+        self.ws = ws
+        self._id = 0
+        self.session_id = None
+
+    def _next_id(self):
+        self._id += 1
+        return self._id
+
+    async def send(self, method: str, params: dict = None, use_session: bool = True, timeout: float = CDP_TIMEOUT):
+        """Send a CDP command and wait for its response (by id)."""
+        msg_id = self._next_id()
+        msg = {"id": msg_id, "method": method, "params": params or {}}
+        if use_session and self.session_id:
+            msg["sessionId"] = self.session_id
+        await self.ws.send(json.dumps(msg))
+
+        start = asyncio.get_event_loop().time()
+        while True:
+            remaining = timeout - (asyncio.get_event_loop().time() - start)
+            if remaining <= 0:
+                raise asyncio.TimeoutError(f"CDP timeout waiting for {method}")
+            resp_str = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+            resp = json.loads(resp_str)
+            # Skip events and responses for other ids/sessions.
+            if resp.get("id") == msg_id:
+                if "error" in resp:
+                    raise RuntimeError(f"CDP {method} error: {resp['error']}")
+                return resp.get("result", {})
+
+    async def attach_to_page(self):
+        """Find a real page target and attach (flatten) to it."""
+        targets = (await self.send("Target.getTargets", use_session=False)).get("targetInfos", [])
+        page = next((t for t in targets if _is_real_page(t)), None)
+
+        if not page:
+            # No usable page target — create one on about:blank.
+            created = await self.send("Target.createTarget", {"url": "about:blank"}, use_session=False)
+            target_id = created.get("targetId")
+        else:
+            target_id = page.get("targetId")
+
+        attached = await self.send(
+            "Target.attachToTarget",
+            {"targetId": target_id, "flatten": True},
+            use_session=False,
+        )
+        self.session_id = attached.get("sessionId")
+        if not self.session_id:
+            raise RuntimeError("Target.attachToTarget returned no sessionId")
+        # Enable the domains we rely on BEFORE issuing Page/Runtime commands.
+        await self.send("Page.enable")
+        await self.send("Runtime.enable")
+        return self.session_id
+
+
+async def _with_session(fn):
+    """Open browser socket, attach to a page, run fn(session), always clean up."""
+    ws_url = await _get_browser_ws()
+    if not ws_url:
+        return {"error": "No browser webSocketDebuggerUrl available"}
+    async with websockets.connect(ws_url, open_timeout=10, close_timeout=5, max_size=None) as ws:
+        session = CDPSession(ws)
+        await session.attach_to_page()
+        return await fn(session)
+
 
 async def cdp_send(method: str, params: dict = None, session_id: str = None):
-    """Send a CDP command to the browser."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    """Back-compat helper: attach to a page and run a single command over the session.
+
+    Returns {"result": ...} on success or {"error": ...} on failure, matching
+    the shape the endpoints below already expect.
+    """
+    async def _run(session: CDPSession):
         try:
-            targets_res = await client.get(f"{CDP_URL}/json")
-            targets = targets_res.json()
+            result = await session.send(method, params or {})
+            return {"result": result}
         except Exception as e:
-            return {"error": f"Failed to connect to CDP: {e}"}
-        
-        # Pick a real browsing tab, not an extension's own page target.
-        # The base image force-installs a couple of extensions (SponsorBlock,
-        # etc. via /etc/chromium/policies/managed/policies.json) and their
-        # background/help pages register as CDP type=="page" targets too —
-        # often listed BEFORE the actual "New Tab" / user tab. Sending
-        # Page.navigate to one of those extension pages just hangs forever
-        # (no frame ever attaches), which is exactly why every /navigate
-        # call was timing out after 15s despite CDP being "connected".
-        page_target = next(
-            (t for t in targets
-             if isinstance(t, dict)
-             and t.get("type") == "page"
-             and not t.get("url", "").startswith("chrome-extension://")),
-            None
-        )
-        
-        if not page_target:
-            try:
-                new_res = await client.get(f"{CDP_URL}/json/new")
-                page_target = new_res.json()
-            except Exception as e:
-                return {"error": f"No page target found and failed to create new target: {e}"}
-        
-        ws_url = page_target.get("webSocketDebuggerUrl")
-        if not ws_url:
-            return {"error": "Page target has no webSocketDebuggerUrl"}
-        
-        ws_url = ws_url.replace("localhost", "127.0.0.1")
-        
+            return {"error": str(e) or type(e).__name__}
+    try:
+        return await _with_session(_run)
+    except Exception as e:
+        return {"error": f"CDP connection failed: {str(e) or type(e).__name__}"}
+
+
+async def cdp_navigate(url: str):
+    """Navigate the attached page. Resolves on Page.navigate's OWN return
+    (commit: frameId/loaderId present) — NOT on load-complete, so a slow
+    subresource can't eat the timeout after the nav already succeeded."""
+    async def _run(session: CDPSession):
         try:
-            async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
-                msg_id = 1
-                msg = {
-                    "id": msg_id,
-                    "method": method,
-                    "params": params or {}
-                }
-                await ws.send(json.dumps(msg))
-                
-                start_time = asyncio.get_event_loop().time()
-                while True:
-                    remaining = 15.0 - (asyncio.get_event_loop().time() - start_time)
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError("CDP response timeout")
-                    resp_str = await asyncio.wait_for(ws.recv(), timeout=remaining)
-                    resp = json.loads(resp_str)
-                    if resp.get("id") == msg_id:
-                        return resp
+            result = await session.send("Page.navigate", {"url": url})
+            if result.get("errorText"):
+                return {"error": result["errorText"]}
+            return {"result": result}  # has frameId / loaderId = committed
         except Exception as e:
-            err_msg = str(e) or type(e).__name__
-            return {"error": f"CDP connection failed: {err_msg}"}
+            return {"error": str(e) or type(e).__name__}
+    try:
+        return await _with_session(_run)
+    except Exception as e:
+        return {"error": f"CDP connection failed: {str(e) or type(e).__name__}"}
+
 
 async def cdp_evaluate(expression: str):
-    """Evaluate a JavaScript expression in the current page."""
-    result = await cdp_send("Runtime.evaluate", {
-        "expression": expression,
-        "returnByValue": True
-    })
-    if isinstance(result, dict) and "result" in result and "result" in result["result"]:
-        return result["result"]["result"].get("value")
-    return None
+    """Evaluate a JavaScript expression in the attached page."""
+    async def _run(session: CDPSession):
+        try:
+            result = await session.send("Runtime.evaluate", {
+                "expression": expression,
+                "returnByValue": True,
+            })
+            return result.get("result", {}).get("value")
+        except Exception:
+            return None
+    try:
+        return await _with_session(_run)
+    except Exception:
+        return None
+
 
 # ===== Endpoints =====
 
@@ -181,10 +273,10 @@ async def debug_targets():
 async def navigate(req: NavigateRequest):
     try:
         session_store.store.add_to_history(req.user_id, req.url)
-        result = await cdp_send("Page.navigate", {"url": req.url})
+        result = await cdp_navigate(req.url)
         if isinstance(result, dict) and "error" in result:
             return {"status": "error", "message": result["error"]}
-        return {"status": "ok", "url": req.url}
+        return {"status": "ok", "url": req.url, "committed": result.get("result", {})}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
