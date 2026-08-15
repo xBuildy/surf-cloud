@@ -3,11 +3,11 @@ FROM searxng/searxng:latest
 # Copy custom settings
 COPY searxng-settings.yml /etc/searxng/settings.yml
 
-# Create Wave OS dark theme CSS as an additional stylesheet
-# We inject it into the simple theme's static dir so it loads alongside the default
-RUN mkdir -p /usr/local/searxng-src/searx/static/themes/simple/css
+# Create Wave OS dark theme
+RUN mkdir -p /usr/local/searxng-src/searx/static/themes/wave/css
 
-RUN cat > /usr/local/searxng-src/searx/static/themes/simple/css/wave-dark.css << 'CSSEOF'
+# Wave OS dark theme CSS - reskin SearXNG with Wave OS aesthetic
+RUN cat > /usr/local/searxng-src/searx/static/themes/wave/css/wave-dark.css << 'CSSEOF'
 :root {
   --wave-bg: #0a0a0b;
   --wave-surface: #131316;
@@ -179,6 +179,17 @@ a:hover {
   display: none !important;
 }
 
+.wave-brand {
+  font-size: 22px !important;
+  font-weight: 700 !important;
+  color: var(--wave-text) !important;
+  letter-spacing: -0.5px !important;
+}
+
+.wave-brand span {
+  color: var(--wave-accent) !important;
+}
+
 #footer {
   background: var(--wave-surface) !important;
   border-top: 1px solid var(--wave-border) !important;
@@ -213,9 +224,34 @@ a:hover {
 }
 CSSEOF
 
-# Inject our CSS into the simple theme's base template
-RUN sed -i '/<\/head>/i <link rel="stylesheet" href="{{ url_for("static", filename="themes/simple/css/wave-dark.css") }}" type="text/css" />' \
-    /usr/local/searxng-src/searx/templates/simple/base.html 2>/dev/null || true
+# Create the wave theme template directory
+RUN mkdir -p /usr/local/searxng-src/searx/templates/wave
+
+# Copy the simple theme as the wave theme base (we'll override CSS)
+RUN cp -r /usr/local/searxng-src/searx/templates/simple/* /usr/local/searxng-src/searx/templates/wave/ 2>/dev/null || true
+
+# Add Wave Search branding header injection
+RUN cat > /usr/local/searxng-src/searx/templates/wave/base.html << 'HTMLEOF'
+{% extends "simple/base.html" %}
+{% block title %}Wave Search{% endblock %}
+{% block head %}
+{{ super() }}
+<link rel="stylesheet" href="{{ url_for('static', filename='themes/wave/css/wave-dark.css') }}" type="text/css" />
+<style>
+  /* Kill any residual SearXNG wordmark/branding in header + footer */
+  .title h1, .searxng, .instance-name, a[href*="searxng"], .footer a[href*="searxng"] { font-size:0 !important; }
+  .title h1::after, .instance-name::after { content:"Wave Search"; font-size:1.6rem; font-weight:700; }
+</style>
+{% endblock %}
+{% block header %}
+<div class="center wave-header">
+  <div class="wave-brand">Wave<span>Search</span></div>
+</div>
+{% endblock %}
+{% block footer %}
+<footer class="wave-footer"><p>Wave Search &middot; part of Wave OS</p></footer>
+{% endblock %}
+HTMLEOF
 
 EXPOSE 8080
 
