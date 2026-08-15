@@ -246,6 +246,69 @@ async def cdp_evaluate(expression: str):
 
 # ===== Endpoints =====
 
+@app.get("/api/debug/probe")
+async def debug_probe():
+    """Decisive probe. For each candidate socket, send Runtime.enable THEN
+    Page.enable with a 5s per-command timeout, logging every raw frame and
+    which command (if any) hangs. Distinguishes: dead renderer (Runtime hangs
+    too) vs Page-domain-only breakage vs client id-matching bug."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        targets = (await client.get(f"{CDP_URL}/json")).json()
+    real = next((t for t in targets if _is_real_page(t)), None)
+
+    async def probe_socket(ws_url, label):
+        log = {"label": label, "ws": ws_url}
+        try:
+            async with _ws_connect(ws_url) as ws:
+                log["connected"] = True
+                for mid, method in [(1, "Runtime.enable"), (2, "Page.enable")]:
+                    await ws.send(json.dumps({"id": mid, "method": method}))
+                    frames = []
+                    got = False
+                    start = asyncio.get_event_loop().time()
+                    try:
+                        while True:
+                            rem = 5.0 - (asyncio.get_event_loop().time() - start)
+                            if rem <= 0:
+                                break
+                            raw = await asyncio.wait_for(ws.recv(), timeout=rem)
+                            frames.append(raw[:200])
+                            m = json.loads(raw)
+                            if m.get("id") == mid:
+                                got = True
+                                break
+                    except asyncio.TimeoutError:
+                        pass
+                    log[method] = {"responded": got, "frames_seen": len(frames), "sample": frames[:3]}
+                    if not got:
+                        break
+        except Exception as e:
+            log["error"] = str(e) or type(e).__name__
+        return log
+
+    results = {}
+    # Candidate 1: the existing real page target's own socket.
+    if real:
+        results["existing_page"] = await probe_socket(
+            real.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1"),
+            "existing_page")
+    # Candidate 2: a freshly created target via /json/new (spins a fresh renderer).
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                newt = (await client.put(f"{CDP_URL}/json/new?about:blank")).json()
+            except Exception:
+                newt = (await client.get(f"{CDP_URL}/json/new?about:blank")).json()
+        results["fresh_target"] = await probe_socket(
+            newt.get("webSocketDebuggerUrl", "").replace("localhost", "127.0.0.1"),
+            "fresh_target")
+    except Exception as e:
+        results["fresh_target"] = {"error": str(e) or type(e).__name__}
+
+    return {"targets_seen": [{"type": t.get("type"), "url": (t.get("url") or "")[:60]} for t in targets], "probes": results}
+
+
+
 @app.get("/health")
 @app.get("/api/health")
 async def health():
