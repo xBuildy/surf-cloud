@@ -27,9 +27,13 @@ from typing import Optional, List
 # configured via env (e.g. a backup Theta shard or an alt model).
 def _backends():
     chain = []
-    primary_ep = os.environ.get("THETA_API", "https://ai.thetaedgecloud.com/v1/chat/completions")
+    # Primary = Theta EdgeCloud Wave Assistant chatbot-agent endpoint.
+    # NOTE: this is the /api/v1/chatbot/{id}/chat/completions path, which is
+    # UP and independent of the flaky shared /v1/chat/completions gateway.
+    primary_ep = os.environ.get("THETA_API", "https://ai.thetaedgecloud.com/api/v1/chatbot/chtz4ssnbcf405uy4e05/chat/completions")
     primary_key = os.environ.get("THETA_KEY", "surf-default-key")
-    primary_model = os.environ.get("THETA_MODEL", "glm-5.2")
+    # model="" => omit the model field (chatbot-agent uses its own configured model)
+    primary_model = os.environ.get("THETA_MODEL", "")
     chain.append((primary_ep, primary_model, primary_key))
 
     # Optional secondary (e.g. a different Theta shard or alt model).
@@ -51,14 +55,19 @@ async def _theta_chat(messages: list, max_tokens: int, client: httpx.AsyncClient
     last_err = None
     for (endpoint, model, key) in _backends():
         try:
+            payload = {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": False,
+            }
+            # Only include model for raw OpenAI-compatible endpoints; the
+            # chatbot-agent endpoint uses its own configured model.
+            if model:
+                payload["model"] = model
             res = await client.post(
                 endpoint,
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
+                json=payload,
                 headers={"Authorization": f"Bearer {key}"},
                 timeout=per_try_timeout,
             )
@@ -66,12 +75,16 @@ async def _theta_chat(messages: list, max_tokens: int, client: httpx.AsyncClient
             if res.status_code >= 500:
                 last_err = f"http {res.status_code}"
                 continue
-            # Body must be JSON with a choices message; empty => treat as failure
+            # Body must be JSON; empty => treat as failure
             try:
                 data = res.json()
             except Exception as e:
                 last_err = f"non-json body ({e})"
                 continue
+            # Theta chatbot-agent wraps the OpenAI payload as
+            # {"status":"success","body":{...}}. Unwrap if present.
+            if isinstance(data, dict) and "body" in data and isinstance(data["body"], dict):
+                data = data["body"]
             choices = (data or {}).get("choices") or []
             if not choices:
                 last_err = "empty choices"
