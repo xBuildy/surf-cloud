@@ -246,6 +246,41 @@ async def cdp_evaluate(expression: str):
 
 # ===== Endpoints =====
 
+@app.get("/api/debug/env")
+async def debug_env():
+    """Inspect the container: managed policies, running chrome flags, who
+    listens on 9222. This tells us if a policy is blocking CDP or if neko is
+    proxying the port."""
+    import subprocess, glob, os
+    out = {}
+    # Managed policies (can restrict remote debugging / devtools).
+    pol = {}
+    for p in glob.glob("/etc/chromium/policies/**/*.json", recursive=True) + \
+            glob.glob("/etc/opt/chrome/policies/**/*.json", recursive=True):
+        try:
+            pol[p] = open(p).read()[:2000]
+        except Exception as e:
+            pol[p] = f"read error: {e}"
+    out["managed_policies"] = pol or "none found"
+    # Running chromium process + its flags.
+    try:
+        ps = subprocess.run(["ps", "-eo", "pid,comm,args"], capture_output=True, text=True, timeout=5).stdout
+        out["chrome_procs"] = [l for l in ps.splitlines() if "chrom" in l.lower()][:6]
+    except Exception as e:
+        out["chrome_procs"] = f"err: {e}"
+    # Who listens on 9222.
+    try:
+        ss = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=5).stdout
+        out["port_9222"] = [l for l in ss.splitlines() if ":9222" in l] or "not found via ss"
+    except Exception as e:
+        try:
+            netstat = subprocess.run(["cat", "/proc/net/tcp"], capture_output=True, text=True, timeout=5).stdout
+            out["port_9222"] = "9222=0x2406; check /proc/net/tcp manually"
+        except Exception as e2:
+            out["port_9222"] = f"err: {e} / {e2}"
+    return out
+
+
 @app.get("/api/debug/browsersession")
 async def debug_browsersession():
     """Test the ONE remaining path now that Origin is set: browser socket +
