@@ -85,13 +85,15 @@ CDP_TIMEOUT = 20.0
 
 
 def _is_real_page(t: dict) -> bool:
-    """A real, attachable browsing tab — not an extension/devtools/internal target."""
+    """A real, attachable browsing tab — not an extension/devtools/internal target.
+    Also excludes chrome:// pages (the New Tab Page renderer wedges on this
+    build and its CDP socket never answers Page.enable)."""
     if not isinstance(t, dict):
         return False
     if t.get("type") != "page":
         return False
     url = t.get("url", "") or ""
-    for bad in ("chrome-extension://", "devtools://", "chrome-untrusted://"):
+    for bad in ("chrome-extension://", "devtools://", "chrome-untrusted://", "chrome://"):
         if url.startswith(bad):
             return False
     return True
@@ -151,7 +153,12 @@ async def _pick_page_ws() -> str:
         targets = (await client.get(f"{CDP_URL}/json")).json()
         page = next((t for t in targets if _is_real_page(t)), None)
         if not page:
-            page = (await client.get(f"{CDP_URL}/json/new?about:blank")).json()
+            # Create a fresh about:blank tab. Newer Chrome requires PUT for
+            # /json/new and rejects GET; try PUT first, fall back to GET.
+            try:
+                page = (await client.put(f"{CDP_URL}/json/new?about:blank")).json()
+            except Exception:
+                page = (await client.get(f"{CDP_URL}/json/new?about:blank")).json()
     ws = page.get("webSocketDebuggerUrl", "")
     return ws.replace("localhost", "127.0.0.1")
 
