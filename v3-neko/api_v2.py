@@ -256,7 +256,8 @@ async def health():
                 "browser": version.get("Browser", "unknown"),
                 "cdp": "connected",
                 "engine": "thorium" if "Thorium" in version.get("Browser", "") else "chromium",
-                "webrtc": "neko"
+                "webrtc": "neko",
+                "ai_available": (await ai_resolver.ai_health(client)).get("ai_available")
             }
     except Exception as e:
         err_msg = str(e) or type(e).__name__
