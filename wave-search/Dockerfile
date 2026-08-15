@@ -253,6 +253,21 @@ RUN cat > /usr/local/searxng-src/searx/templates/wave/base.html << 'HTMLEOF'
 {% endblock %}
 HTMLEOF
 
+# ---- Global rebrand: replace every hardcoded "SearXNG" wordmark in the stock
+# simple theme templates + macros with "Wave Search" (title h1, footer "Powered by",
+# meta description/keywords). This catches strings the block-overrides can't reach.
+RUN set -e; \
+    SRC=/usr/local/searxng-src/searx; \
+    grep -rIl "SearXNG" "$SRC/templates/simple" "$SRC/templates/wave" 2>/dev/null | while read f; do \
+      sed -i \
+        -e 's/>SearXNG</>Wave Search</g' \
+        -e 's/Powered by <a href="\/info\/en\/about">SearXNG<\/a>[^<]*/Powered by Wave Search /g' \
+        -e 's/content="SearXNG[^"]*"/content="Wave Search — a privacy-respecting metasearch engine"/g' \
+        "$f" || true; \
+    done; \
+    # hide the "Source code / Issue tracker" github links and version string in footer \
+    sed -i 's#<a href="https://github.com/searxng/searxng">Source code</a>##g; s#<a href="https://github.com/searxng/searxng/issues">Issue tracker</a>##g' "$SRC/templates/simple/base.html" || true
+
 EXPOSE 8080
 
 CMD ["uwsgi", "--http", "0.0.0.0:8080", "--wsgi-file", "searx/webapp.py", "--master", "--processes", "4", "--threads", "2"]
