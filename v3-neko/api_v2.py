@@ -28,32 +28,6 @@ app.add_middleware(
 
 CDP_URL = "http://127.0.0.1:9222"
 
-# ===== Auth =====
-#
-# SURF_API_KEY is read from the environment. If it's not set (e.g. the
-# Railway env var hasn't been added yet), every endpoint stays OPEN — so
-# this code can deploy immediately with zero outage risk. The moment the
-# env var is actually set on Railway, enforcement kicks in automatically
-# on the very next request, no redeploy required.
-import os as _os
-from fastapi import Header, HTTPException, Depends
-
-SURF_API_KEY = _os.environ.get("SURF_API_KEY", "").strip()
-
-
-async def require_api_key(
-    x_surf_api_key: Optional[str] = Header(None, alias="X-Surf-Api-Key"),
-    authorization: Optional[str] = Header(None),
-):
-    if not SURF_API_KEY:
-        return True  # not configured yet — stay open
-    provided = x_surf_api_key
-    if not provided and authorization and authorization.lower().startswith("bearer "):
-        provided = authorization[7:]
-    if provided != SURF_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing Surf API key")
-    return True
-
 # ===== Models =====
 
 class NavigateRequest(BaseModel):
@@ -434,8 +408,8 @@ async def debug_targets():
             out["targets_error"] = str(e)
     return out
 
-@app.post("/navigate", dependencies=[Depends(require_api_key)])
-@app.post("/api/navigate", dependencies=[Depends(require_api_key)])
+@app.post("/navigate")
+@app.post("/api/navigate")
 async def navigate(req: NavigateRequest):
     try:
         session_store.store.add_to_history(req.user_id, req.url)
@@ -447,8 +421,8 @@ async def navigate(req: NavigateRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/click", dependencies=[Depends(require_api_key)])
-@app.post("/api/click", dependencies=[Depends(require_api_key)])
+@app.post("/click")
+@app.post("/api/click")
 async def click(req: ClickRequest):
     try:
         js = f"""
@@ -464,8 +438,8 @@ async def click(req: ClickRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/type", dependencies=[Depends(require_api_key)])
-@app.post("/api/type", dependencies=[Depends(require_api_key)])
+@app.post("/type")
+@app.post("/api/type")
 async def type_text(req: TypeRequest):
     try:
         js = f"""
@@ -487,8 +461,8 @@ async def type_text(req: TypeRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.get("/content", dependencies=[Depends(require_api_key)])
-@app.get("/api/content", dependencies=[Depends(require_api_key)])
+@app.get("/content")
+@app.get("/api/content")
 async def get_content(user_id: Optional[str] = "demo"):
     try:
         js = "document.body.innerText"
@@ -498,8 +472,8 @@ async def get_content(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/observe", dependencies=[Depends(require_api_key)])
-@app.post("/api/observe", dependencies=[Depends(require_api_key)])
+@app.post("/observe")
+@app.post("/api/observe")
 async def observe(req: ObserveRequest):
     try:
         content = await cdp_evaluate("document.body.innerHTML.substring(0, 5000)", user_id=req.user_id) or ""
@@ -511,8 +485,8 @@ async def observe(req: ObserveRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/act", dependencies=[Depends(require_api_key)])
-@app.post("/api/act", dependencies=[Depends(require_api_key)])
+@app.post("/act")
+@app.post("/api/act")
 async def act(req: ActRequest):
     try:
         observe_result = await observe(ObserveRequest(instruction=req.instruction, user_id=req.user_id))
@@ -530,8 +504,8 @@ async def act(req: ActRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/extract", dependencies=[Depends(require_api_key)])
-@app.post("/api/extract", dependencies=[Depends(require_api_key)])
+@app.post("/extract")
+@app.post("/api/extract")
 async def extract(req: ExtractRequest):
     try:
         content = await cdp_evaluate("document.body.innerText", user_id=req.user_id) or ""
@@ -541,8 +515,8 @@ async def extract(req: ExtractRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.get("/screenshot", dependencies=[Depends(require_api_key)])
-@app.get("/api/screenshot", dependencies=[Depends(require_api_key)])
+@app.get("/screenshot")
+@app.get("/api/screenshot")
 async def screenshot(user_id: Optional[str] = "demo"):
     try:
         result = await cdp_send("Page.captureScreenshot", {"format": "png"}, user_id=user_id)
@@ -555,8 +529,8 @@ async def screenshot(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/resize", dependencies=[Depends(require_api_key)])
-@app.post("/api/resize", dependencies=[Depends(require_api_key)])
+@app.post("/resize")
+@app.post("/api/resize")
 async def resize(req: ResizeRequest):
     try:
         result = await cdp_send("Emulation.setDeviceMetricsOverride", {
@@ -570,8 +544,8 @@ async def resize(req: ResizeRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/automate", dependencies=[Depends(require_api_key)])
-@app.post("/api/automate", dependencies=[Depends(require_api_key)])
+@app.post("/automate")
+@app.post("/api/automate")
 async def automate(req: AutomateRequest):
     try:
         plan = await ai_resolver.plan_task(req.task)
@@ -600,8 +574,8 @@ async def automate(req: AutomateRequest):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/back", dependencies=[Depends(require_api_key)])
-@app.post("/api/back", dependencies=[Depends(require_api_key)])
+@app.post("/back")
+@app.post("/api/back")
 async def back(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("history.back()", user_id=user_id)
@@ -610,8 +584,8 @@ async def back(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/forward", dependencies=[Depends(require_api_key)])
-@app.post("/api/forward", dependencies=[Depends(require_api_key)])
+@app.post("/forward")
+@app.post("/api/forward")
 async def forward(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("history.forward()", user_id=user_id)
@@ -620,8 +594,8 @@ async def forward(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.post("/reload", dependencies=[Depends(require_api_key)])
-@app.post("/api/reload", dependencies=[Depends(require_api_key)])
+@app.post("/reload")
+@app.post("/api/reload")
 async def reload(user_id: Optional[str] = "demo"):
     try:
         await cdp_evaluate("location.reload()", user_id=user_id)
@@ -630,8 +604,8 @@ async def reload(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
-@app.delete("/session/destroy", dependencies=[Depends(require_api_key)])
-@app.delete("/api/session/destroy", dependencies=[Depends(require_api_key)])
+@app.delete("/session/destroy")
+@app.delete("/api/session/destroy")
 async def destroy_session(user_id: Optional[str] = "demo"):
     """Destroy this user's isolated context only. Never calls Browser.close —
     that closes the ENTIRE shared Chromium instance for every user, which was
