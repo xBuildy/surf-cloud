@@ -498,6 +498,32 @@ async def get_content(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
+@app.get("/dom", dependencies=[Depends(require_api_key)])
+@app.get("/api/dom", dependencies=[Depends(require_api_key)])
+async def get_dom(user_id: Optional[str] = "demo", max_length: int = 500000):
+    """Full raw HTML DOM after JS render — document.documentElement.outerHTML.
+    Unlike /api/content (which returns visible innerText), this is the actual
+    markup, useful for feeding an external LLM/parser that wants real HTML
+    structure (tags, attributes, hidden elements) instead of just rendered text.
+    Truncated to max_length chars (default 500k) to avoid huge payloads;
+    response reports whether truncation happened."""
+    try:
+        js = "document.documentElement.outerHTML"
+        html = await cdp_evaluate(js, user_id=user_id) or ""
+        total_length = len(html)
+        truncated = total_length > max_length
+        if truncated:
+            html = html[:max_length]
+        return {
+            "status": "ok",
+            "html": html,
+            "length": total_length,
+            "truncated": truncated,
+        }
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
+
 @app.post("/observe", dependencies=[Depends(require_api_key)])
 @app.post("/api/observe", dependencies=[Depends(require_api_key)])
 async def observe(req: ObserveRequest):
