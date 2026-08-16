@@ -508,8 +508,13 @@ async def get_dom(user_id: Optional[str] = "demo", max_length: int = 500000):
     Truncated to max_length chars (default 500k) to avoid huge payloads;
     response reports whether truncation happened."""
     try:
-        js = "document.documentElement.outerHTML"
-        html = await cdp_evaluate(js, user_id=user_id) or ""
+        # TEMP DEBUG: grab outerHTML, innerText length, and current URL in one
+        # atomic evaluation, so a mismatch can't be blamed on session/timing.
+        js = "JSON.stringify({html: document.documentElement.outerHTML, textLen: (document.body ? document.body.innerText.length : -1), href: document.location.href, readyState: document.readyState})"
+        raw = await cdp_evaluate(js, user_id=user_id) or "{}"
+        import json as _json
+        parsed = _json.loads(raw)
+        html = parsed.get("html", "") or ""
         total_length = len(html)
         truncated = total_length > max_length
         if truncated:
@@ -519,6 +524,9 @@ async def get_dom(user_id: Optional[str] = "demo", max_length: int = 500000):
             "html": html,
             "length": total_length,
             "truncated": truncated,
+            "_debug_textLen": parsed.get("textLen"),
+            "_debug_href": parsed.get("href"),
+            "_debug_readyState": parsed.get("readyState"),
         }
     except Exception as e:
         err_msg = str(e) or type(e).__name__
