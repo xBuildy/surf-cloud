@@ -178,9 +178,107 @@ async def _pick_page_ws() -> str:
     return ws.replace("localhost", "127.0.0.1")
 
 
-async def _with_session(fn):
-    """Open the page-level socket, enable domains, run fn(session), clean up."""
-    ws_url = await _pick_page_ws()
+# ===== Per-user browser context isolation =====
+#
+# Real isolation = a genuinely separate CDP browser context per user_id
+# (Target.createBrowserContext), so cookies/localStorage/cache never bleed
+# between users. This is attempted first; if this Chrome build rejects
+# Target.* commands over the browser socket (as it has historically for
+# Target.attachToTarget with -32000 "Not allowed"), we cache that fact and
+# fall back to the single shared page for every user_id, matching old
+# behavior — same as before this change, so nothing regresses if isolation
+# turns out to be unsupported on this build.
+
+_ISOLATION_SUPPORTED = None  # None = untested, True/False = probed result
+
+
+async def _browser_ws_url() -> str:
+    """The BROWSER-level (not page-level) CDP WebSocket debugger URL."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        version = (await client.get(f"{CDP_URL}/json/version")).json()
+    ws = version.get("webSocketDebuggerUrl", "")
+    return ws.replace("localhost", "127.0.0.1")
+
+
+async def _create_isolated_context() -> Optional[str]:
+    """Try Target.createBrowserContext. Returns browserContextId or None."""
+    try:
+        ws_url = await _browser_ws_url()
+        if not ws_url:
+            return None
+        async with _ws_connect(ws_url) as ws:
+            session = CDPSession(ws)
+            result = await session.send("Target.createBrowserContext", {}, use_session=False, timeout=5.0)
+            return result.get("browserContextId")
+    except Exception:
+        return None
+
+
+async def _create_target_in_context(browser_context_id: str) -> Optional[dict]:
+    """Create a new page target inside a specific isolated browser context."""
+    try:
+        ws_url = await _browser_ws_url()
+        if not ws_url:
+            return None
+        async with _ws_connect(ws_url) as ws:
+            session = CDPSession(ws)
+            result = await session.send("Target.createTarget", {
+                "url": "about:blank",
+                "browserContextId": browser_context_id
+            }, use_session=False, timeout=5.0)
+        target_id = result.get("targetId")
+        if not target_id:
+            return None
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            targets = (await client.get(f"{CDP_URL}/json")).json()
+        return next((t for t in targets if t.get("id") == target_id), None)
+    except Exception:
+        return None
+
+
+async def _get_user_page_ws(user_id: str) -> str:
+    """webSocketDebuggerUrl for this user's OWN isolated page when possible.
+    Falls back to the single shared page if this Chrome build blocks
+    Target.createBrowserContext/createTarget over the browser socket."""
+    global _ISOLATION_SUPPORTED
+    sess = session_store.store.get_session(user_id)
+
+    # Reuse this user's existing isolated target if it's still alive.
+    existing_ws = sess.get("page_ws")
+    if existing_ws:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                targets = (await client.get(f"{CDP_URL}/json")).json()
+            if any(t.get("webSocketDebuggerUrl") == existing_ws for t in targets):
+                return existing_ws.replace("localhost", "127.0.0.1")
+        except Exception:
+            pass
+
+    if _ISOLATION_SUPPORTED is not False:
+        browser_context_id = sess.get("browser_context_id")
+        if not browser_context_id:
+            browser_context_id = await _create_isolated_context()
+            if browser_context_id:
+                sess["browser_context_id"] = browser_context_id
+
+        if browser_context_id:
+            target = await _create_target_in_context(browser_context_id)
+            if target and target.get("webSocketDebuggerUrl"):
+                _ISOLATION_SUPPORTED = True
+                ws = target["webSocketDebuggerUrl"].replace("localhost", "127.0.0.1")
+                sess["page_ws"] = ws
+                sess["target_id"] = target.get("id")
+                return ws
+
+        _ISOLATION_SUPPORTED = False  # createBrowserContext/createTarget unavailable on this build
+
+    # ----- Fallback: shared page across all users (pre-isolation behavior) -----
+    return await _pick_page_ws()
+
+
+async def _with_session(fn, user_id: str = "demo"):
+    """Open this user's page-level socket, enable domains, run fn(session)."""
+    ws_url = await _get_user_page_ws(user_id)
     if not ws_url:
         return {"error": "No page webSocketDebuggerUrl available"}
     async with _ws_connect(ws_url) as ws:
@@ -189,7 +287,7 @@ async def _with_session(fn):
         return await fn(session)
 
 
-async def cdp_send(method: str, params: dict = None, session_id: str = None):
+async def cdp_send(method: str, params: dict = None, session_id: str = None, user_id: str = "demo"):
     """Back-compat helper: attach to a page and run a single command over the session.
 
     Returns {"result": ...} on success or {"error": ...} on failure, matching
@@ -202,13 +300,13 @@ async def cdp_send(method: str, params: dict = None, session_id: str = None):
         except Exception as e:
             return {"error": str(e) or type(e).__name__}
     try:
-        return await _with_session(_run)
+        return await _with_session(_run, user_id=user_id)
     except Exception as e:
         return {"error": f"CDP connection failed: {str(e) or type(e).__name__}"}
 
 
-async def cdp_navigate(url: str):
-    """Navigate the attached page. Resolves on Page.navigate's OWN return
+async def cdp_navigate(url: str, user_id: str = "demo"):
+    """Navigate this user's own page. Resolves on Page.navigate's OWN return
     (commit: frameId/loaderId present) — NOT on load-complete, so a slow
     subresource can't eat the timeout after the nav already succeeded."""
     async def _run(session: CDPSession):
@@ -220,13 +318,13 @@ async def cdp_navigate(url: str):
         except Exception as e:
             return {"error": str(e) or type(e).__name__}
     try:
-        return await _with_session(_run)
+        return await _with_session(_run, user_id=user_id)
     except Exception as e:
         return {"error": f"CDP connection failed: {str(e) or type(e).__name__}"}
 
 
-async def cdp_evaluate(expression: str):
-    """Evaluate a JavaScript expression in the attached page."""
+async def cdp_evaluate(expression: str, user_id: str = "demo"):
+    """Evaluate a JavaScript expression in this user's own page."""
     async def _run(session: CDPSession):
         try:
             result = await session.send("Runtime.evaluate", {
@@ -237,7 +335,7 @@ async def cdp_evaluate(expression: str):
         except Exception:
             return None
     try:
-        return await _with_session(_run)
+        return await _with_session(_run, user_id=user_id)
     except Exception:
         return None
 
@@ -315,7 +413,7 @@ async def debug_targets():
 async def navigate(req: NavigateRequest):
     try:
         session_store.store.add_to_history(req.user_id, req.url)
-        result = await cdp_navigate(req.url)
+        result = await cdp_navigate(req.url, user_id=req.user_id)
         if isinstance(result, dict) and "error" in result:
             return {"status": "error", "message": result["error"]}
         return {"status": "ok", "url": req.url, "committed": result.get("result", {})}
@@ -334,7 +432,7 @@ async def click(req: ClickRequest):
             return false;
         }})()
         """
-        result = await cdp_evaluate(js)
+        result = await cdp_evaluate(js, user_id=req.user_id)
         return {"status": "ok" if result else "error", "clicked": bool(result)}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -357,7 +455,7 @@ async def type_text(req: TypeRequest):
             return false;
         }})()
         """
-        result = await cdp_evaluate(js)
+        result = await cdp_evaluate(js, user_id=req.user_id)
         return {"status": "ok" if result else "error", "typed": bool(result)}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -368,7 +466,7 @@ async def type_text(req: TypeRequest):
 async def get_content(user_id: Optional[str] = "demo"):
     try:
         js = "document.body.innerText"
-        content = await cdp_evaluate(js)
+        content = await cdp_evaluate(js, user_id=user_id)
         return {"status": "ok", "content": content or ""}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -378,7 +476,7 @@ async def get_content(user_id: Optional[str] = "demo"):
 @app.post("/api/observe")
 async def observe(req: ObserveRequest):
     try:
-        content = await cdp_evaluate("document.body.innerHTML.substring(0, 5000)") or ""
+        content = await cdp_evaluate("document.body.innerHTML.substring(0, 5000)", user_id=req.user_id) or ""
         selector = await ai_resolver.resolve_element(req.instruction, content)
         if selector:
             return {"status": "ok", "elements": [{"description": req.instruction, "selector": selector, "method": "css"}]}
@@ -410,7 +508,7 @@ async def act(req: ActRequest):
 @app.post("/api/extract")
 async def extract(req: ExtractRequest):
     try:
-        content = await cdp_evaluate("document.body.innerText") or ""
+        content = await cdp_evaluate("document.body.innerText", user_id=req.user_id) or ""
         extracted = await ai_resolver.extract_data(req.instruction, content, req.max_results or 5)
         return {"status": "ok", "data": extracted}
     except Exception as e:
@@ -421,7 +519,7 @@ async def extract(req: ExtractRequest):
 @app.get("/api/screenshot")
 async def screenshot(user_id: Optional[str] = "demo"):
     try:
-        result = await cdp_send("Page.captureScreenshot", {"format": "png"})
+        result = await cdp_send("Page.captureScreenshot", {"format": "png"}, user_id=user_id)
         if isinstance(result, dict) and "result" in result and "data" in result["result"]:
             import base64
             img_data = base64.b64decode(result["result"]["data"])
@@ -440,7 +538,7 @@ async def resize(req: ResizeRequest):
             "height": req.height,
             "deviceScaleFactor": 1,
             "mobile": False
-        })
+        }, user_id=req.user_id)
         return {"status": "ok", "width": req.width, "height": req.height}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -480,7 +578,7 @@ async def automate(req: AutomateRequest):
 @app.post("/api/back")
 async def back(user_id: Optional[str] = "demo"):
     try:
-        await cdp_evaluate("history.back()")
+        await cdp_evaluate("history.back()", user_id=user_id)
         return {"status": "ok"}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -490,7 +588,7 @@ async def back(user_id: Optional[str] = "demo"):
 @app.post("/api/forward")
 async def forward(user_id: Optional[str] = "demo"):
     try:
-        await cdp_evaluate("history.forward()")
+        await cdp_evaluate("history.forward()", user_id=user_id)
         return {"status": "ok"}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -500,7 +598,7 @@ async def forward(user_id: Optional[str] = "demo"):
 @app.post("/api/reload")
 async def reload(user_id: Optional[str] = "demo"):
     try:
-        await cdp_evaluate("location.reload()")
+        await cdp_evaluate("location.reload()", user_id=user_id)
         return {"status": "ok"}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
@@ -509,13 +607,44 @@ async def reload(user_id: Optional[str] = "demo"):
 @app.delete("/session/destroy")
 @app.delete("/api/session/destroy")
 async def destroy_session(user_id: Optional[str] = "demo"):
+    """Destroy this user's isolated context only. Never calls Browser.close —
+    that closes the ENTIRE shared Chromium instance for every user, which was
+    the previous (dangerous) behavior."""
     try:
-        await cdp_send("Browser.close")
+        sess = session_store.store.sessions.get(user_id, {})
+        browser_context_id = sess.get("browser_context_id")
+        if browser_context_id:
+            try:
+                ws_url = await _browser_ws_url()
+                async with _ws_connect(ws_url) as ws:
+                    cdp_session = CDPSession(ws)
+                    await cdp_session.send(
+                        "Target.disposeBrowserContext",
+                        {"browserContextId": browser_context_id},
+                        use_session=False,
+                        timeout=5.0,
+                    )
+            except Exception:
+                pass  # best-effort cleanup
         session_store.store.destroy_session(user_id)
         return {"status": "ok"}
     except Exception as e:
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
+
+
+@app.get("/api/debug/isolation")
+async def debug_isolation():
+    """Report whether real per-user CDP browser-context isolation is active
+    on this build, and list active isolated sessions."""
+    active = [
+        {"user_id": uid, "isolated": bool(s.get("browser_context_id"))}
+        for uid, s in session_store.store.sessions.items()
+    ]
+    return {
+        "isolation_supported": _ISOLATION_SUPPORTED,
+        "active_sessions": active,
+    }
 
 if __name__ == "__main__":
     import uvicorn
