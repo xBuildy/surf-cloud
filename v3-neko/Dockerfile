@@ -98,6 +98,11 @@ COPY frontend/ /app/frontend/
 # frontend shell, the CDP API on :8000, Neko WebRTC on :8081, and
 # Chromium's raw CDP port :9222)
 COPY nginx.conf /etc/nginx/sites-available/default
+# Also keep a pristine copy as a template. nginx-proc.conf renders this at
+# boot, substituting __SURF_API_KEY__ so the shell's /shell-api/ path can
+# authenticate to the CDP API without the key ever being in the repo or
+# shipped to the browser.
+COPY nginx.conf /etc/nginx/nginx.conf.template
 
 # Move Neko off the base image's default :8080 (nginx now owns that
 # port) onto :8081, matching what nginx.conf already expects.

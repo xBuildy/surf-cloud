@@ -586,6 +586,25 @@ async def get_content(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
+@app.get("/current-url", dependencies=[Depends(require_api_key)])
+@app.get("/api/current-url", dependencies=[Depends(require_api_key)])
+async def current_url(user_id: Optional[str] = "demo"):
+    """Live URL + title of the page the real browser is actually on.
+
+    The frontend shell's address bar polls this so it reflects reality --
+    otherwise the bar only ever shows what WE last told it to navigate to,
+    and goes stale the moment the user clicks a link inside the video stream
+    (or a page redirects). Kiosk mode removed Chromium's own address bar, so
+    this is now the only way the shell can know the current URL.
+    """
+    try:
+        url = await cdp_evaluate("location.href", user_id=user_id)
+        title = await cdp_evaluate("document.title", user_id=user_id)
+        return {"status": "ok", "url": url or "", "title": title or ""}
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return {"status": "error", "message": err_msg}
+
 @app.get("/dom", dependencies=[Depends(require_api_key)])
 @app.get("/api/dom", dependencies=[Depends(require_api_key)])
 async def get_dom(user_id: Optional[str] = "demo", max_length: int = 500000):

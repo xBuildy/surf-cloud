@@ -4,7 +4,10 @@
    Connects to Neko WebRTC viewer + CDP API backend
    ============================================================ */
 
-const API_BASE = window.location.origin + '/api';
+// Shell calls go through /shell-api, where nginx injects X-Surf-Api-Key
+// server-side. Using /api directly here returned 401 on every action,
+// and hardcoding the key in this file would expose it to end users.
+const API_BASE = window.location.origin + '/shell-api';
 const WAVE_SEARCH_URL = 'https://wave-search-production.up.railway.app';
 const NEKO_VIEWER_URL = window.location.origin + '/neko/?usr=wave&pwd=neko&u=wave&p=neko&embed=1&show_side=0&volume=0';
 
@@ -56,6 +59,10 @@ function init() {
     // Check connection status
     checkConnection();
     setInterval(checkConnection, 5000);
+
+    // Keep the address bar in sync with the browser's real URL
+    syncCurrentUrl();
+    setInterval(syncCurrentUrl, 2000);
     
     statusText.textContent = 'Ready';
 }
@@ -309,6 +316,22 @@ async function checkConnection() {
     } catch {
         connectionStatus.className = 'status-dot disconnected';
     }
+}
+
+// ===== Address bar sync =====
+
+// Mirror the real browser URL into the address bar. Skipped while the input
+// is focused so we never overwrite what the user is mid-way through typing.
+async function syncCurrentUrl() {
+    if (document.activeElement === urlInput) return;
+    try {
+        const res = await fetch(API_BASE + '/current-url?user_id=' + getUser());
+        const data = await res.json();
+        if (data.status === 'ok' && data.url && data.url !== 'about:blank') {
+            urlInput.value = data.url;
+            statusUrl.textContent = data.url;
+        }
+    } catch {}
 }
 
 // ===== Helpers =====
