@@ -5,6 +5,7 @@ All automation endpoints talk to CDP on localhost:9222
 """
 
 import json
+import math
 import asyncio
 import httpx
 import websockets
@@ -668,21 +669,247 @@ async def screenshot(user_id: Optional[str] = "demo"):
         err_msg = str(e) or type(e).__name__
         return {"status": "error", "message": err_msg}
 
+# ===== X11 Resolution Resizing Helpers =====
+
+def generate_cvt_rb_modeline(h_pixels: int, v_lines: int, refresh_rate: float = 60.0) -> str:
+    """
+    Pure Python VESA CVT Reduced Blanking modeline generator (CVT v1.2 / libxcvt).
+    Returns modeline arguments string:
+    'pclk hdisp hsyncstart hsyncend htotal vdisp vsyncstart vsyncend vtotal +hsync -vsync'
+    """
+    CELL_GRAN = 8.0
+    CLOCK_STEP = 0.25  # MHz
+    RB_MIN_V_BLANK = 460.0  # us
+    RB_V_FP = 3
+    RB_H_FP = 48
+    RB_H_SYNC = 32
+    RB_H_BLANK = 160
+
+    # 1. Round horizontal pixels to cell granularity (multiple of 8)
+    h_pixels_rnd = math.floor(h_pixels / CELL_GRAN) * CELL_GRAN
+    v_lines_rnd = float(v_lines)
+
+    # 2. Estimate h_period (us)
+    h_period_est = ((1000000.0 / refresh_rate) - RB_MIN_V_BLANK) / v_lines_rnd
+    v_bi_lines = math.floor(RB_MIN_V_BLANK / h_period_est) + 1
+
+    RB_V_SYNC = 4
+    RB_MIN_VBI = RB_V_FP + RB_V_SYNC + 1
+    if v_bi_lines < RB_MIN_VBI:
+        v_bi_lines = RB_MIN_VBI
+
+    v_total = int(v_lines_rnd + v_bi_lines)
+    h_total = int(h_pixels_rnd + RB_H_BLANK)
+
+    act_pixel_freq = math.floor((refresh_rate * v_total * h_total / 1000000.0) / CLOCK_STEP) * CLOCK_STEP
+
+    h_sync_start = int(h_pixels_rnd + RB_H_FP)
+    h_sync_end = int(h_sync_start + RB_H_SYNC)
+
+    v_sync_start = int(v_lines_rnd + RB_V_FP)
+    v_sync_end = int(v_sync_start + RB_V_SYNC)
+
+    return f"{act_pixel_freq:.2f} {int(h_pixels_rnd)} {h_sync_start} {h_sync_end} {h_total} {int(v_lines_rnd)} {v_sync_start} {v_sync_end} {v_total} +hsync -vsync"
+
+
+async def _run_xrandr_cmd(cmd: list[str]) -> tuple[int, str, str]:
+    """Helper to run xrandr commands with proper DISPLAY env."""
+    env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99.0"))
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
+
+
+async def get_x11_output_name() -> str:
+    """Discover the connected X11 output name at runtime via xrandr --query."""
+    code, out, err = await _run_xrandr_cmd(["xrandr", "--query"])
+    if code != 0:
+        raise RuntimeError(f"xrandr --query failed (code {code}): {err}")
+
+    for line in out.splitlines():
+        if " connected" in line:
+            parts = line.split()
+            if parts:
+                return parts[0]
+    raise RuntimeError("No connected X11 output found in xrandr query output")
+
+
+async def _set_chromium_window_bounds(applied_width: int, applied_height: int, user_id: str = "demo") -> dict:
+    """
+    Force Chromium's window to fill the new screen size via CDP:
+    Get windowId via Browser.getWindowForTarget and call Browser.setWindowBounds.
+    Returns details on whether it succeeded and how windowId was resolved.
+    """
+    applied_by = None
+    window_id = None
+
+    # Try browser socket first
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{CDP_URL}/json/version")
+            data = resp.json()
+            browser_ws_url = data.get("webSocketDebuggerUrl")
+
+        if browser_ws_url:
+            async with _ws_connect(browser_ws_url) as ws:
+                session = CDPSession(ws)
+                try:
+                    res = await session.send("Browser.getWindowForTarget", {}, use_session=False)
+                    window_id = res.get("windowId")
+                except Exception:
+                    # Get targets list to pass targetId
+                    async with httpx.AsyncClient(timeout=3.0) as client:
+                        targets_resp = await client.get(f"{CDP_URL}/json")
+                        targets = targets_resp.json()
+                        page_target = next((t for t in targets if _is_real_page(t)), None)
+                        if page_target and "id" in page_target:
+                            res = await session.send("Browser.getWindowForTarget", {"targetId": page_target["id"]}, use_session=False)
+                            window_id = res.get("windowId")
+
+                if window_id is not None:
+                    await session.send("Browser.setWindowBounds", {
+                        "windowId": window_id,
+                        "bounds": {
+                            "left": 0,
+                            "top": 0,
+                            "width": applied_width,
+                            "height": applied_height,
+                            "windowState": "normal"
+                        }
+                    }, use_session=False)
+                    applied_by = "browser_socket"
+    except Exception as e:
+        print(f"Browser socket window bounds failed: {e}")
+
+    # Fallback to page-level session if needed
+    if not applied_by:
+        async def _run_page_bounds(session: CDPSession):
+            nonlocal window_id
+            res = await session.send("Browser.getWindowForTarget", {}, use_session=False)
+            window_id = res.get("windowId")
+            if window_id is not None:
+                await session.send("Browser.setWindowBounds", {
+                    "windowId": window_id,
+                    "bounds": {
+                        "left": 0,
+                        "top": 0,
+                        "width": applied_width,
+                        "height": applied_height,
+                        "windowState": "normal"
+                    }
+                }, use_session=False)
+
+        try:
+            await _with_session(_run_page_bounds, user_id=user_id)
+            applied_by = "page_socket"
+        except Exception as e:
+            print(f"Page socket window bounds failed: {e}")
+
+    return {"success": bool(applied_by), "applied_by": applied_by, "window_id": window_id}
+
+
 @app.post("/resize", dependencies=[Depends(require_api_key)])
 @app.post("/api/resize", dependencies=[Depends(require_api_key)])
 async def resize(req: ResizeRequest):
     try:
-        result = await cdp_send("Emulation.setDeviceMetricsOverride", {
-            "width": req.width,
-            "height": req.height,
-            "deviceScaleFactor": 1,
-            "mobile": False
-        }, user_id=req.user_id)
-        return {"status": "ok", "width": req.width, "height": req.height}
+        # a. Discover connected X11 output name
+        output_name = await get_x11_output_name()
+
+        # b. Round requested width down to a multiple of 8
+        applied_width = (req.width // 8) * 8
+
+        # c. Clamp rounded width/height to max 1920x1080
+        MAX_WIDTH = 1920
+        MAX_HEIGHT = 1080
+        clamped = False
+        clamped_reasons = []
+
+        if applied_width > MAX_WIDTH:
+            applied_width = MAX_WIDTH
+            clamped = True
+            clamped_reasons.append(f"width clamped to max {MAX_WIDTH}")
+        elif applied_width < 64:
+            applied_width = 64
+            clamped = True
+            clamped_reasons.append("width clamped to min 64")
+
+        applied_height = req.height
+        if applied_height > MAX_HEIGHT:
+            applied_height = MAX_HEIGHT
+            clamped = True
+            clamped_reasons.append(f"height clamped to max {MAX_HEIGHT}")
+        elif applied_height < 64:
+            applied_height = 64
+            clamped = True
+            clamped_reasons.append("height clamped to min 64")
+
+        mode_name = f"{applied_width}x{applied_height}"
+
+        # d. Try xrandr --output <name> --mode <W>x<H> first (fast path)
+        code, out, err = await _run_xrandr_cmd(["xrandr", "--output", output_name, "--mode", mode_name])
+
+        # e. If that fails, generate CVT modeline and create/add/apply mode
+        if code != 0:
+            modeline = generate_cvt_rb_modeline(applied_width, applied_height, 60.0)
+            modeline_args = modeline.split()
+
+            # Create new mode
+            code_new, out_new, err_new = await _run_xrandr_cmd(["xrandr", "--newmode", mode_name] + modeline_args)
+            # Add mode to output
+            code_add, out_add, err_add = await _run_xrandr_cmd(["xrandr", "--addmode", output_name, mode_name])
+            # Apply mode
+            code_set, out_set, err_set = await _run_xrandr_cmd(["xrandr", "--output", output_name, "--mode", mode_name])
+
+            if code_set != 0:
+                # f. Capture and surface real xrandr stdout/stderr on failure
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "Failed to set X11 resolution via xrandr",
+                        "output": output_name,
+                        "mode": mode_name,
+                        "xrandr_newmode": {"code": code_new, "stdout": out_new, "stderr": err_new},
+                        "xrandr_addmode": {"code": code_add, "stdout": out_add, "stderr": err_add},
+                        "xrandr_setmode": {"code": code_set, "stdout": out_set, "stderr": err_set},
+                    }
+                )
+
+        # g. AFTER X11 change succeeds, force Chromium's window to fill it via CDP
+        cdp_bounds_res = await _set_chromium_window_bounds(applied_width, applied_height, user_id=req.user_id)
+
+        # Also set CDP Emulation override
+        try:
+            await cdp_send("Emulation.setDeviceMetricsOverride", {
+                "width": applied_width,
+                "height": applied_height,
+                "deviceScaleFactor": 1,
+                "mobile": False
+            }, user_id=req.user_id)
+        except Exception:
+            pass
+
+        # h. Return ACTUALLY applied width/height in response body
+        return {
+            "status": "ok",
+            "width": applied_width,
+            "height": applied_height,
+            "requested_width": req.width,
+            "requested_height": req.height,
+            "clamped": clamped,
+            "clamped_reasons": clamped_reasons,
+            "x11_output": output_name,
+            "cdp_bounds": cdp_bounds_res
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         err_msg = str(e) or type(e).__name__
-        return {"status": "error", "message": err_msg}
-
+        raise HTTPException(status_code=500, detail=f"Resize failed: {err_msg}")
 @app.post("/automate", dependencies=[Depends(require_api_key)])
 @app.post("/api/automate", dependencies=[Depends(require_api_key)])
 async def automate(req: AutomateRequest):

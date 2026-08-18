@@ -44,11 +44,12 @@ FROM m1k1o/neko:chromium AS base
 USER root
 
 # Only add what the base image doesn't already have: pip (for our
-# Python CDP API) and nginx (our reverse proxy / public entrypoint).
+# Python CDP API), nginx (our reverse proxy / public entrypoint), and x11-xserver-utils (for xrandr).
 # Everything browser/X11/audio-related is already in the base image.
 RUN apt-get update && apt-get install -y \
     python3-pip \
     nginx \
+    x11-xserver-utils \
     && apt-get clean
 
 # Override the base image's chromium program def (adds CDP flags) and
