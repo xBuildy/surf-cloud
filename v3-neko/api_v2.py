@@ -177,12 +177,93 @@ class CDPSession:
                     raise RuntimeError(f"CDP {method} error: {resp['error']}")
                 return resp.get("result", {})
 
+    async def navigate_and_wait_commit(self, url: str, timeout: float = CDP_TIMEOUT) -> dict:
+        """Send Page.navigate and wait for ITS OWN commit to land — matched
+        precisely by loaderId + main frameId (both come back in Page.navigate's
+        own ack) — before returning. Three things this guards against:
+
+        1. loaderId matching: a stale Page.lifecycleEvent left over from the
+           PREVIOUS navigation (still unread on the socket, or racing in from
+           the previous page) has a DIFFERENT loaderId and will never satisfy
+           this wait, even though it shares the same frameId.
+        2. Fast-fail on errorText: if Page.navigate's own ack already contains
+           errorText (e.g. net::ERR_ABORTED), we return immediately — we do
+           NOT sit out the full timeout waiting for a lifecycle event that,
+           by definition, is never coming for a navigation CDP itself rejected.
+        3. frameId scoping: only lifecycle events for the exact frameId
+           Page.navigate returned (the main frame) count. This same page-level
+           socket also delivers Page.lifecycleEvent for iframes/subframes —
+           without this check, a sub-frame's "DOMContentLoaded" could satisfy
+           the wait for a main-frame navigation that hasn't actually committed.
+
+        Because an event can legitimately race ahead of the command's own ack
+        on the wire, events seen before we know the real frameId/loaderId are
+        buffered and re-checked the moment the ack arrives.
+        """
+        msg_id = self._next_id()
+        await self.ws.send(json.dumps({"id": msg_id, "method": "Page.navigate", "params": {"url": url}}))
+
+        start = asyncio.get_event_loop().time()
+        nav_result = None       # {frameId, loaderId, errorText?} once the ack arrives
+        pending_events = []     # Page.lifecycleEvent params seen before nav_result lands
+        committed = False
+
+        def _matches(params: dict) -> bool:
+            return (
+                params.get("frameId") == nav_result.get("frameId")
+                and params.get("loaderId") == nav_result.get("loaderId")
+                and params.get("name") in ("commit", "DOMContentLoaded")
+            )
+
+        while True:
+            remaining = timeout - (asyncio.get_event_loop().time() - start)
+            if remaining <= 0:
+                break
+            try:
+                resp = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=remaining))
+            except asyncio.TimeoutError:
+                break
+
+            if resp.get("id") == msg_id:
+                if "error" in resp:
+                    return {"error": f"Page.navigate error: {resp['error']}"}
+                nav_result = resp.get("result", {})
+                if nav_result.get("errorText"):
+                    # (2) Fast-fail — no lifecycle event will follow a navigation
+                    # CDP itself already rejected.
+                    return {"error": nav_result["errorText"]}
+                if any(_matches(p) for p in pending_events):
+                    committed = True
+                    break
+                continue
+
+            if resp.get("method") == "Page.lifecycleEvent":
+                params = resp.get("params", {})
+                if nav_result is None:
+                    pending_events.append(params)  # ack not in yet — check later
+                elif _matches(params):
+                    committed = True
+                    break
+
+        if nav_result is None:
+            return {"error": "CDP timeout waiting for Page.navigate ack"}
+        return {"result": {**nav_result, "committed": committed}}
+
     async def prepare(self):
         """Enable the domains we rely on BEFORE issuing Page/Runtime commands.
         On a page-level socket there is no sessionId — commands go straight to
         the attached page, so use_session stays False throughout."""
         await self.send("Page.enable", use_session=False)
         await self.send("Runtime.enable", use_session=False)
+        try:
+            # Needed for Page.lifecycleEvent (commit/DOMContentLoaded) to fire
+            # at all — cdp_navigate waits on these to confirm a navigation
+            # actually committed instead of returning on Page.navigate's own
+            # "accepted" ack. Best-effort: if unsupported on this build,
+            # navigate falls back to its pre-commit-wait behavior.
+            await self.send("Page.setLifecycleEventsEnabled", {"enabled": True}, use_session=False)
+        except Exception:
+            pass
 
 
 async def _pick_page_ws() -> str:
@@ -332,15 +413,21 @@ async def cdp_send(method: str, params: dict = None, session_id: str = None, use
 
 
 async def cdp_navigate(url: str, user_id: str = "demo"):
-    """Navigate this user's own page. Resolves on Page.navigate's OWN return
-    (commit: frameId/loaderId present) — NOT on load-complete, so a slow
-    subresource can't eat the timeout after the nav already succeeded."""
+    """Navigate this user's own page and wait for the navigation to actually
+    COMMIT — matched by loaderId + main frameId, see
+    CDPSession.navigate_and_wait_commit — before returning. NOT on
+    Page.navigate's own "accepted" ack, which arrives the instant Chrome
+    accepts the command, well before the provisional load resolves. Returning
+    (and letting _with_session's `async with` close the socket) before commit
+    raced Chrome into treating the debugger detach as a reason to cancel the
+    still-provisional load, surfacing as net::ERR_ABORTED on otherwise-valid
+    navigations."""
     async def _run(session: CDPSession):
         try:
-            result = await session.send("Page.navigate", {"url": url}, use_session=False)
-            if result.get("errorText"):
-                return {"error": result["errorText"]}
-            return {"result": result}  # has frameId / loaderId = committed
+            outcome = await session.navigate_and_wait_commit(url)
+            if outcome.get("error"):
+                return {"error": outcome["error"]}
+            return {"result": outcome["result"]}
         except Exception as e:
             return {"error": str(e) or type(e).__name__}
     try:
